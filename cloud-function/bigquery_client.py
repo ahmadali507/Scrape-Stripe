@@ -99,7 +99,7 @@ class BigQueryClient:
     
     def insert_raw_data(self, entity_type: str, data: List[Dict]) -> None:
         """
-        Insert raw JSON data into BigQuery.
+        Insert raw JSON data into BigQuery in batches to reduce memory usage.
         
         Args:
             entity_type: Type of entity ('customers', 'subscriptions', 'invoices')
@@ -112,32 +112,42 @@ class BigQueryClient:
         table_name = f"{entity_type}_raw"
         table_id = f"{self.project_id}.{self.raw_dataset}.{table_name}"
         
-        # Prepare rows for insertion
-        rows_to_insert = []
-        for item in data:
-            row = {
-                'id': item.get('id'),
-                'json_data': json.dumps(item),
-                'ingested_at': datetime.utcnow().isoformat(),
-                'created': datetime.fromtimestamp(item.get('created', 0)).isoformat()
-            }
-            rows_to_insert.append(row)
+        # Process in batches to reduce memory usage
+        batch_size = 500
+        total_inserted = 0
         
-        # Insert data
-        errors = self.client.insert_rows_json(table_id, rows_to_insert)
+        for i in range(0, len(data), batch_size):
+            batch = data[i:i + batch_size]
+            
+            # Prepare rows for insertion
+            rows_to_insert = []
+            for item in batch:
+                row = {
+                    'id': item.get('id'),
+                    'json_data': json.dumps(item),
+                    'ingested_at': datetime.utcnow().isoformat(),
+                    'created': datetime.fromtimestamp(item.get('created', 0)).isoformat()
+                }
+                rows_to_insert.append(row)
+            
+            # Insert batch
+            errors = self.client.insert_rows_json(table_id, rows_to_insert)
+            
+            if errors:
+                logger.error(f"Errors inserting raw data batch: {errors}")
+                raise Exception(f"Failed to insert raw data: {errors}")
+            
+            total_inserted += len(rows_to_insert)
+            logger.info(f"Inserted batch {i//batch_size + 1}: {len(rows_to_insert)} rows")
         
-        if errors:
-            logger.error(f"Errors inserting raw data: {errors}")
-            raise Exception(f"Failed to insert raw data: {errors}")
-        
-        logger.info(f"Inserted {len(rows_to_insert)} rows into {table_id}")
+        logger.info(f"Total inserted {total_inserted} rows into {table_id}")
     
     def upsert_processed_data(self, entity_type: str, data: List[Dict]) -> None:
         """
         Transform and upsert data into processed tables.
         
         Args:
-            entity_type: Type of entity ('customers', 'subscriptions', 'invoices')
+            entity_type: Type of entity ('customers', 'subscriptions')
             data: List of Stripe objects
         """
         if not data:
@@ -149,66 +159,79 @@ class BigQueryClient:
             self._upsert_customers(data)
         elif entity_type == 'subscriptions':
             self._upsert_subscriptions(data)
-        elif entity_type == 'invoices':
-            self._upsert_invoices(data)
         else:
             raise ValueError(f"Unknown entity type: {entity_type}")
     
     def _upsert_customers(self, customers: List[Dict]) -> None:
-        """Upsert customer data into processed table."""
+        """Upsert customer data into processed table in batches."""
         table_id = f"{self.project_id}.{self.processed_dataset}.customers"
         
-        rows_to_insert = []
-        for customer in customers:
-            address = customer.get('address', {}) or {}
+        batch_size = 500
+        total_upserted = 0
+        
+        for i in range(0, len(customers), batch_size):
+            batch = customers[i:i + batch_size]
+            rows_to_insert = []
             
-            row = {
-                'customer_id': customer.get('id'),
-                'object_type': customer.get('object'),
-                'email': customer.get('email'),
-                'name': customer.get('name'),
-                'description': customer.get('description'),
-                'phone': customer.get('phone'),
-                'created': datetime.fromtimestamp(customer.get('created', 0)).isoformat(),
-                'created_timestamp': customer.get('created', 0),
+            for customer in batch:
+                address = customer.get('address', {}) or {}
                 
-                # Address
-                'address_line1': address.get('line1'),
-                'address_line2': address.get('line2'),
-                'address_city': address.get('city'),
-                'address_state': address.get('state'),
-                'address_postal_code': address.get('postal_code'),
-                'address_country': address.get('country'),
-                
-                # Billing
-                'currency': customer.get('currency'),
-                'balance': customer.get('balance'),
-                'delinquent': customer.get('delinquent'),
-                
-                # Metadata
-                'default_source': customer.get('default_source'),
-                'invoice_prefix': customer.get('invoice_prefix'),
-                
-                # Tracking
-                'updated_at': datetime.utcnow().isoformat(),
-                'ingested_at': datetime.utcnow().isoformat()
-            }
-            rows_to_insert.append(row)
+                row = {
+                    'customer_id': customer.get('id'),
+                    'object_type': customer.get('object'),
+                    'email': customer.get('email'),
+                    'name': customer.get('name'),
+                    'description': customer.get('description'),
+                    'phone': customer.get('phone'),
+                    'created': datetime.fromtimestamp(customer.get('created', 0)).isoformat(),
+                    'created_timestamp': customer.get('created', 0),
+                    
+                    # Address
+                    'address_line1': address.get('line1'),
+                    'address_line2': address.get('line2'),
+                    'address_city': address.get('city'),
+                    'address_state': address.get('state'),
+                    'address_postal_code': address.get('postal_code'),
+                    'address_country': address.get('country'),
+                    
+                    # Billing
+                    'currency': customer.get('currency'),
+                    'balance': customer.get('balance'),
+                    'delinquent': customer.get('delinquent'),
+                    
+                    # Metadata
+                    'default_source': customer.get('default_source'),
+                    'invoice_prefix': customer.get('invoice_prefix'),
+                    
+                    # Tracking
+                    'updated_at': datetime.utcnow().isoformat(),
+                    'ingested_at': datetime.utcnow().isoformat()
+                }
+                rows_to_insert.append(row)
+            
+            errors = self.client.insert_rows_json(table_id, rows_to_insert)
+            
+            if errors:
+                logger.error(f"Errors upserting customers batch: {errors}")
+                raise Exception(f"Failed to upsert customers: {errors}")
+            
+            total_upserted += len(rows_to_insert)
+            logger.info(f"Upserted batch {i//batch_size + 1}: {len(rows_to_insert)} customers")
         
-        errors = self.client.insert_rows_json(table_id, rows_to_insert)
-        
-        if errors:
-            logger.error(f"Errors upserting customers: {errors}")
-            raise Exception(f"Failed to upsert customers: {errors}")
-        
-        logger.info(f"Upserted {len(rows_to_insert)} customers")
+        logger.info(f"Total upserted {total_upserted} customers")
     
     def _upsert_subscriptions(self, subscriptions: List[Dict]) -> None:
-        """Upsert subscription data into processed table."""
+        """Upsert subscription data into processed table in batches."""
         table_id = f"{self.project_id}.{self.processed_dataset}.subscriptions"
         
-        rows_to_insert = []
-        for subscription in subscriptions:
+        batch_size = 500
+        total_upserted = 0
+        
+        for i in range(0, len(subscriptions), batch_size):
+            batch = subscriptions[i:i + batch_size]
+            rows_to_insert = []
+            
+            for subscription in batch:
             # Extract plan/price information
             items = subscription.get('items', {}).get('data', [])
             price_info = {}
@@ -259,75 +282,19 @@ class BigQueryClient:
                 'updated_at': datetime.utcnow().isoformat(),
                 'ingested_at': datetime.utcnow().isoformat()
             }
-            rows_to_insert.append(row)
+                rows_to_insert.append(row)
+            
+            errors = self.client.insert_rows_json(table_id, rows_to_insert)
+            
+            if errors:
+                logger.error(f"Errors upserting subscriptions batch: {errors}")
+                raise Exception(f"Failed to upsert subscriptions: {errors}")
+            
+            total_upserted += len(rows_to_insert)
+            logger.info(f"Upserted batch {i//batch_size + 1}: {len(rows_to_insert)} subscriptions")
         
-        errors = self.client.insert_rows_json(table_id, rows_to_insert)
-        
-        if errors:
-            logger.error(f"Errors upserting subscriptions: {errors}")
-            raise Exception(f"Failed to upsert subscriptions: {errors}")
-        
-        logger.info(f"Upserted {len(rows_to_insert)} subscriptions")
+        logger.info(f"Total upserted {total_upserted} subscriptions")
     
-    def _upsert_invoices(self, invoices: List[Dict]) -> None:
-        """Upsert invoice data into processed table."""
-        table_id = f"{self.project_id}.{self.processed_dataset}.invoices"
-        
-        rows_to_insert = []
-        for invoice in invoices:
-            row = {
-                'invoice_id': invoice.get('id'),
-                'object_type': invoice.get('object'),
-                'number': invoice.get('number'),
-                'status': invoice.get('status'),
-                'created': datetime.fromtimestamp(invoice.get('created', 0)).isoformat(),
-                'created_timestamp': invoice.get('created', 0),
-                
-                # Customer
-                'customer_id': invoice.get('customer'),
-                'customer_email': invoice.get('customer_email'),
-                'customer_name': invoice.get('customer_name'),
-                
-                # Subscription
-                'subscription_id': invoice.get('subscription'),
-                
-                # Amounts
-                'currency': invoice.get('currency'),
-                'amount_due': invoice.get('amount_due'),
-                'amount_paid': invoice.get('amount_paid'),
-                'amount_remaining': invoice.get('amount_remaining'),
-                'subtotal': invoice.get('subtotal'),
-                'total': invoice.get('total'),
-                'tax': invoice.get('tax'),
-                
-                # Dates
-                'due_date': datetime.fromtimestamp(invoice.get('due_date', 0)).isoformat() if invoice.get('due_date') else None,
-                'paid_at': datetime.fromtimestamp(invoice.get('status_transitions', {}).get('paid_at', 0)).isoformat() if invoice.get('status_transitions', {}).get('paid_at') else None,
-                'period_start': datetime.fromtimestamp(invoice.get('period_start', 0)).isoformat() if invoice.get('period_start') else None,
-                'period_end': datetime.fromtimestamp(invoice.get('period_end', 0)).isoformat() if invoice.get('period_end') else None,
-                
-                # Payment
-                'paid': invoice.get('paid'),
-                'attempted': invoice.get('attempted'),
-                'attempt_count': invoice.get('attempt_count'),
-                
-                # Details
-                'description': invoice.get('description'),
-                'statement_descriptor': invoice.get('statement_descriptor'),
-                
-                # Tracking
-                'updated_at': datetime.utcnow().isoformat(),
-                'ingested_at': datetime.utcnow().isoformat()
-            }
-            rows_to_insert.append(row)
-        
-        errors = self.client.insert_rows_json(table_id, rows_to_insert)
-        
-        if errors:
-            logger.error(f"Errors upserting invoices: {errors}")
-            raise Exception(f"Failed to upsert invoices: {errors}")
-        
-        logger.info(f"Upserted {len(rows_to_insert)} invoices")
     
     def update_sync_metadata(
         self,

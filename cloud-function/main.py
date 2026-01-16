@@ -43,7 +43,7 @@ def sync_handler(request: Request) -> tuple[str, int]:
                 entities = [entities]
             logger.info(f"Syncing specific entities: {entities}")
         else:
-            entities = ['customers', 'subscriptions', 'invoices']
+            entities = ['customers', 'subscriptions']
             logger.info(f"Syncing all entities: {entities}")
         
         # Initialize clients

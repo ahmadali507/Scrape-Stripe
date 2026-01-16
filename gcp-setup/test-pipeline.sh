@@ -133,7 +133,14 @@ CUSTOMERS_PROC_COUNT=$(bq query --use_legacy_sql=false --format=csv \
 
 echo "  Processed customers: $CUSTOMERS_PROC_COUNT"
 
-if [ "$CUSTOMERS_PROC_COUNT" -gt 0 ]; then
+echo "  Checking processed subscriptions..."
+SUBS_PROC_COUNT=$(bq query --use_legacy_sql=false --format=csv \
+    "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.stripe_processed.subscriptions\`" \
+    | tail -n 1 || echo "0")
+
+echo "  Processed subscriptions: $SUBS_PROC_COUNT"
+
+if [ "$CUSTOMERS_PROC_COUNT" -gt 0 ] || [ "$SUBS_PROC_COUNT" -gt 0 ]; then
     echo -e "${GREEN}  ✓ Data found in BigQuery tables${NC}"
 else
     echo -e "${YELLOW}  ⚠ No data in processed tables yet${NC}"

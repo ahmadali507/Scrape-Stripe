@@ -18,8 +18,7 @@ Automated daily sync of Stripe data (customers, subscriptions, invoices) to Goog
 | Stripe Entity | BigQuery Table | Fields |
 |--------------|----------------|---------|
 | **Customers** | `stripe_processed.customers` | ID, email, name, address, phone, created date, billing info |
-| **Subscriptions** | `stripe_processed.subscriptions` | ID, customer, status, amount, plan, interval, period dates |
-| **Invoices** | `stripe_processed.invoices` | ID, customer, amounts, status, payment dates, line items |
+| **Subscriptions** | `stripe_processed.subscriptions` | ID, customer, status, amount, plan, interval, period dates, cancellation info |
 
 ## 🏗️ Architecture
 
@@ -45,14 +44,12 @@ Automated daily sync of Stripe data (customers, subscriptions, invoices) to Goog
 │  │ stripe_raw (Raw JSON Backup)            │ │
 │  │  • customers_raw                        │ │
 │  │  • subscriptions_raw                    │ │
-│  │  • invoices_raw                         │ │
 │  └─────────────────────────────────────────┘ │
 │                                               │
 │  ┌─────────────────────────────────────────┐ │
 │  │ stripe_processed (Clean Tables)         │ │
 │  │  • customers                            │ │
 │  │  • subscriptions                        │ │
-│  │  • invoices                             │ │
 │  └─────────────────────────────────────────┘ │
 │                                               │
 │  ┌─────────────────────────────────────────┐ │
@@ -134,14 +131,16 @@ FROM `stripe_processed.subscriptions`
 WHERE status = 'active'
 GROUP BY plan_name;
 
--- Revenue by month
+-- MRR by plan
 SELECT 
-  DATE_TRUNC(created, MONTH) as month,
-  SUM(amount_paid)/100 as revenue
-FROM `stripe_processed.invoices`
-WHERE paid = true
-GROUP BY month
-ORDER BY month DESC;
+  plan_name,
+  subscription_interval,
+  COUNT(*) as subscriptions,
+  SUM(amount) as mrr
+FROM `stripe_processed.subscriptions`
+WHERE status = 'active'
+GROUP BY plan_name, subscription_interval
+ORDER BY mrr DESC;
 ```
 
 📊 **More Queries**: See [sql/example_queries.sql](sql/example_queries.sql)

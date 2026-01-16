@@ -22,8 +22,6 @@ USING (
   SELECT 'customers' AS entity_type
   UNION ALL
   SELECT 'subscriptions' AS entity_type
-  UNION ALL
-  SELECT 'invoices' AS entity_type
 ) AS source
 ON target.entity_type = source.entity_type
 WHEN NOT MATCHED THEN

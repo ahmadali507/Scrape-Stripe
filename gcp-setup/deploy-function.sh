@@ -29,7 +29,7 @@ REGION="us-central1"
 RUNTIME="python311"
 ENTRY_POINT="sync_handler"
 SERVICE_ACCOUNT="stripe-sync-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-MEMORY="512MB"
+MEMORY="2GB"
 TIMEOUT="540s"
 
 # Get the directory where this script is located

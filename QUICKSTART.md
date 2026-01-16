@@ -89,9 +89,6 @@ SELECT * FROM `stripe_processed.customers` LIMIT 10;
 -- View subscriptions
 SELECT * FROM `stripe_processed.subscriptions` LIMIT 10;
 
--- View invoices
-SELECT * FROM `stripe_processed.invoices` LIMIT 10;
-
 -- Check sync status
 SELECT * FROM `stripe_metadata.sync_history` 
 ORDER BY sync_completed_at DESC;

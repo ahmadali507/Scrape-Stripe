@@ -74,8 +74,7 @@ class StripeClient:
         """
         endpoint_map = {
             'customers': '/customers',
-            'subscriptions': '/subscriptions',
-            'invoices': '/invoices'
+            'subscriptions': '/subscriptions'
         }
         
         if entity_type not in endpoint_map:
