@@ -8,11 +8,18 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file (handle encoding errors)
+try:
+    load_dotenv()
+except UnicodeDecodeError as e:
+    print(f"Warning: Could not read .env file due to encoding error: {e}")
+    print("Attempting to continue with system environment variables...")
+except Exception as e:
+    print(f"Warning: Could not load .env file: {e}")
+    print("Attempting to continue with system environment variables...")
 
 # Stripe API Configuration
-# Load from environment variable (set in .env file)
+# Load from environment variable (set in .env file or system environment)
 STRIPE_API_KEY = os.getenv('STRIPE_SECRET_KEY')
 STRIPE_API_BASE = 'https://api.stripe.com/v1'
 
@@ -20,7 +27,9 @@ STRIPE_API_BASE = 'https://api.stripe.com/v1'
 if not STRIPE_API_KEY:
     raise ValueError(
         "STRIPE_SECRET_KEY not found in environment variables.\n"
-        "Please create a .env file with: STRIPE_SECRET_KEY=your_key_here"
+        "Please either:\n"
+        "  1. Create a .env file (UTF-8 encoded) with: STRIPE_SECRET_KEY=your_key_here\n"
+        "  2. Set the environment variable directly: set STRIPE_SECRET_KEY=your_key_here"
     )
 
 
@@ -210,6 +219,93 @@ def fetch_customer_details(customer_id: str, silent: bool = False) -> Optional[D
                 error_msg += f": {str(e)}"
             print(f"  Warning: {error_msg}")
         return None
+
+
+def fetch_all_customers() -> List[Dict]:
+    """
+    Fetch ALL customers from Stripe API using direct HTTP requests with pagination.
+    Automatically paginates through all pages until all customers are retrieved.
+    
+    Returns:
+        List of all customer objects
+    """
+    print(f"\n=== Fetching ALL customers from Stripe API (no limit) ===")
+    print(f"Note: Stripe API returns max 100 customers per page, auto-paginating to get all...")
+    
+    url = f"{STRIPE_API_BASE}/customers"
+    headers = {
+        'Authorization': f'Bearer {STRIPE_API_KEY}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    
+    all_customers = []
+    page_limit = 100  # Stripe's maximum per page (API limitation)
+    params = {'limit': page_limit}
+    
+    try:
+        page = 1
+        while True:
+            print(f"Fetching page {page}...", end=' ')
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    
+                    if isinstance(data, dict) and 'data' in data:
+                        page_customers = data.get('data', [])
+                        all_customers.extend(page_customers)
+                        
+                        print(f"✓ {len(page_customers)} customers (Total: {len(all_customers)})")
+                        
+                        # Check if there are more pages
+                        has_more = data.get('has_more', False)
+                        if not has_more:
+                            print(f"  All pages retrieved!")
+                            break
+                        
+                        # Set up pagination for next page
+                        if page_customers:
+                            params['starting_after'] = page_customers[-1]['id']
+                        page += 1
+                    else:
+                        print(f"⚠ Unexpected response structure")
+                        break
+                        
+                except Exception as e:
+                    print(f"\nError parsing JSON: {e}")
+                    print(f"Response text: {response.text[:500]}")
+                    break
+            else:
+                print(f"\n=== Error Response ===")
+                print(f"Status: {response.status_code}")
+                try:
+                    error_data = response.json()
+                    print(f"Error JSON: {error_data}")
+                except:
+                    print(f"Response text: {response.text[:500]}")
+                break
+                
+        print(f"\n=== Successfully fetched ALL {len(all_customers)} customers ===")
+        return all_customers
+            
+    except requests.exceptions.Timeout:
+        print(f"\n=== Timeout Error ===")
+        print("Request timed out after 30 seconds")
+        return all_customers
+    except requests.exceptions.ConnectionError as e:
+        print(f"\n=== Connection Error ===")
+        print(f"Error: {e}")
+        print(f"Error type: {type(e).__name__}")
+        return all_customers
+    except Exception as e:
+        print(f"\n=== Unexpected Error ===")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return all_customers
 
 
 def format_timestamp(timestamp: int) -> str:
@@ -806,93 +902,103 @@ def fetch_multiple_subscriptions_with_customers(max_subscriptions: int = 1200) -
     return customer_data_list
 
 
+def analyze_customers(customers: List[Dict]) -> Dict:
+    """
+    Analyze customers to get total count and date range.
+    
+    Args:
+        customers: List of customer objects from Stripe API
+    
+    Returns:
+        Dictionary with total_count, earliest_date, latest_date, and date_range
+    """
+    if not customers:
+        return {
+            'total_count': 0,
+            'earliest_date': None,
+            'latest_date': None,
+            'date_range': 'No customers found'
+        }
+    
+    # Extract all creation timestamps
+    creation_timestamps = []
+    for customer in customers:
+        created = customer.get('created')
+        if created:
+            creation_timestamps.append(created)
+    
+    if not creation_timestamps:
+        return {
+            'total_count': len(customers),
+            'earliest_date': None,
+            'latest_date': None,
+            'date_range': 'No creation dates found'
+        }
+    
+    # Find earliest and latest dates
+    earliest_timestamp = min(creation_timestamps)
+    latest_timestamp = max(creation_timestamps)
+    
+    earliest_date = format_timestamp(earliest_timestamp)
+    latest_date = format_timestamp(latest_timestamp)
+    
+    return {
+        'total_count': len(customers),
+        'earliest_date': earliest_date,
+        'latest_date': latest_date,
+        'earliest_timestamp': earliest_timestamp,
+        'latest_timestamp': latest_timestamp,
+        'date_range': f"{earliest_date} to {latest_date}"
+    }
+
+
 def main():
     """
-    Main function to run the scraper.
+    Main function to analyze Stripe customers and display summary information.
     """
-    print("Stripe Customer Data Scraper")
-    print("=" * 50)
+    print("Stripe Customer Database Analyzer")
+    print("=" * 60)
     
-    # Fetch up to 1200 subscriptions with their customer details
-    customer_data_list = fetch_multiple_subscriptions_with_customers(max_subscriptions=1200)
+    # Fetch all customers from Stripe API
+    customers = fetch_all_customers()
     
-    if customer_data_list:
-        print(f"\nExporting {len(customer_data_list)} customer record(s) to Excel...")
-        export_customers_to_excel(customer_data_list, 'stripe_customers.xlsx')
+    if customers:
+        # Analyze customers
+        analysis = analyze_customers(customers)
         
-        print("\n" + "=" * 50)
-        print("Export completed successfully!")
-        print(f"  - Excel file: stripe_customers.xlsx")
-        print(f"  - Total customers exported: {len(customer_data_list)}")
+        print("\n" + "=" * 60)
+        print("CUSTOMER DATABASE SUMMARY")
+        print("=" * 60)
+        print(f"\nTotal Number of Customers: {analysis['total_count']:,}")
         
-        # Show summary
-        if customer_data_list:
-            print(f"\nSample customers:")
-            for i, customer in enumerate(customer_data_list[:5], 1):
-                name = customer.get('customer_name', 'N/A')
-                email = customer.get('customer_email', 'N/A')
-                print(f"  {i}. {name} ({email})")
-            if len(customer_data_list) > 5:
-                print(f"  ... and {len(customer_data_list) - 5} more")
-    else:
-        print("\n" + "=" * 50)
-        print("Could not fetch subscriptions. Trying single subscription fallback...")
-        print("=" * 50)
-        
-        # Fallback: Try to fetch the specific subscription we know works
-        subscription_id = 'sub_1Scm8EL5YqSpFl3KeJFAFP1g'
-        print(f"\nAttempting to fetch specific subscription: {subscription_id}")
-        subscription = fetch_subscription(subscription_id)
-        
-        if subscription:
-            print("Successfully fetched subscription from API!")
+        if analysis['earliest_date'] and analysis['latest_date']:
+            print(f"\nDate Range Covered:")
+            print(f"  Earliest Customer Created: {analysis['earliest_date']}")
+            print(f"  Latest Customer Created:   {analysis['latest_date']}")
+            print(f"  Full Range:                {analysis['date_range']}")
             
-            customer_id = subscription.get('customer', '')
-            if customer_id:
-                print(f"\nFetching customer details for: {customer_id}")
-                customer = fetch_customer_details(customer_id)
+            # Calculate time span
+            if analysis['earliest_timestamp'] and analysis['latest_timestamp']:
+                time_span_seconds = analysis['latest_timestamp'] - analysis['earliest_timestamp']
+                time_span_days = time_span_seconds / 86400
+                time_span_years = time_span_days / 365.25
                 
-                if customer:
-                    print("Successfully fetched customer details!")
-                    customer_data = extract_customer_data(subscription, customer)
-                    export_customers_to_excel([customer_data], 'stripe_customers.xlsx')
-                    
-                    print("\n" + "=" * 50)
-                    print("Export completed successfully!")
-                    print(f"  - Excel file: stripe_customers.xlsx")
-                    print(f"  - Customer: {customer_data.get('customer_name', 'N/A')} ({customer_data.get('customer_email', 'N/A')})")
-                else:
-                    print(f"Warning: Could not fetch customer details")
-                    customer_data = extract_customer_data(subscription, None)
-                    export_customers_to_excel([customer_data], 'stripe_customers.xlsx')
+                print(f"\nTime Span:")
+                print(f"  Days:  {time_span_days:.1f}")
+                print(f"  Years: {time_span_years:.2f}")
         else:
-            print("\nAPI fetch failed. This could be due to:")
-            print("  - Invalid or insufficient API key permissions")
-            print("  - Network/connection issues")
-            print("  - Key format issues (needs sk_live_... or sk_test_... for full access)")
-            print("\nUsing manual data as fallback...")
-            
-            manual_customer_data = {
-                'object_type': 'subscription',
-                'status': 'active',
-                'created': format_timestamp(1765368274),
-                'created_timestamp': '1765368274',
-                'current_period_start': '',
-                'current_period_end': '',
-                'customer_id': 'cus_TZw07B5NXMht4M',
-                'customer_email': 'Yadiel1235@gmail.com',
-                'customer_name': 'Yadiel I Melendez Miranda',
-                'customer_country': 'PR',
-                'customer_postal_code': '00926',
-                'currency': '',
-                'amount': '',
-                'interval': '',
-                'plan_name': '',
-            }
-            
-            export_customers_to_excel([manual_customer_data], 'stripe_customers.xlsx')
-            print("\nNote: To fetch live data, you may need a Stripe secret key (sk_live_... or sk_test_...)")
-            print("The provided key (rk_live_...) may be a restricted key with limited permissions.")
+            print(f"\nDate Range: {analysis['date_range']}")
+        
+        print("\n" + "=" * 60)
+    else:
+        print("\n" + "=" * 60)
+        print("ERROR: Could not fetch customers from Stripe API")
+        print("=" * 60)
+        print("\nThis could be due to:")
+        print("  - Invalid or insufficient API key permissions")
+        print("  - Network/connection issues")
+        print("  - Key format issues (needs sk_live_... or sk_test_... for full access)")
+        print("\nPlease check your STRIPE_SECRET_KEY in the .env file.")
 
 
 if __name__ == '__main__':
