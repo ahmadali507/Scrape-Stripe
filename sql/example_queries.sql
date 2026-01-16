@@ -112,13 +112,13 @@ ORDER BY subscription_count DESC;
 -- 9. MRR (Monthly Recurring Revenue) by plan
 SELECT 
   plan_name,
-  interval,
+  subscription_interval,
   COUNT(*) as subscription_count,
   SUM(amount) as total_value,
   currency
 FROM `stripe_processed.subscriptions`
 WHERE status = 'active'
-GROUP BY plan_name, interval, currency
+GROUP BY plan_name, subscription_interval, currency
 ORDER BY total_value DESC;
 
 -- 10. Subscription churn analysis

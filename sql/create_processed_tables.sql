@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS stripe_processed.subscriptions (
   -- Pricing information
   currency STRING,
   amount FLOAT64,
-  interval STRING,
+  subscription_interval STRING,
   interval_count INT64,
   
   -- Plan information

@@ -244,7 +244,7 @@ class BigQueryClient:
                 # Pricing
                 'currency': price_info.get('currency') or subscription.get('currency'),
                 'amount': price_info.get('amount'),
-                'interval': price_info.get('interval'),
+                'subscription_interval': price_info.get('interval'),
                 'interval_count': price_info.get('interval_count'),
                 
                 # Plan
