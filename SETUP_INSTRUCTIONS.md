@@ -6,27 +6,6 @@ The pipeline has been updated to sync **only customers and subscriptions** (invo
 
 ## Step-by-Step Setup
 
-### Step 1: Clean Up Old Setup
-
-```bash
-cd ~/Scrape-Stripe/gcp-setup
-chmod +x cleanup.sh
-./cleanup.sh
-```
-
-When prompted, type **`yes`** to confirm deletion.
-
-This removes:
-- ✓ Cloud Scheduler job
-- ✓ Cloud Function
-- ✓ All BigQuery datasets and tables (including old invoice tables)
-
-**Keeps** (for reuse):
-- ✓ Service account (stripe-sync-sa)
-- ✓ Secret Manager (stripe-api-key)
-- ✓ Enabled APIs
-
----
 
 ### Step 2: Recreate BigQuery Structure
 
