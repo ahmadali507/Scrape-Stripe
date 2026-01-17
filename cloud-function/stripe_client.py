@@ -58,16 +58,15 @@ class StripeClient:
     def fetch_incremental_data(
         self, 
         entity_type: str, 
-        since_timestamp: Optional[int] = None,
-        limit: int = 10000
+        since_timestamp: Optional[int] = None
     ) -> List[Dict]:
         """
         Fetch incremental data from Stripe API.
+        Fetches ALL available records without any limit.
         
         Args:
             entity_type: Type of entity ('customers', 'subscriptions', 'invoices')
             since_timestamp: Unix timestamp to fetch data created after
-            limit: Maximum number of records to fetch
             
         Returns:
             List of Stripe objects
@@ -97,7 +96,7 @@ class StripeClient:
         page = 1
         
         try:
-            while len(all_data) < limit:
+            while True:  # Continue until no more pages
                 logger.info(f"    Fetching page {page}...")
                 
                 response = requests.get(url, headers=self.headers, params=params, timeout=30)
@@ -115,18 +114,15 @@ class StripeClient:
                     logger.info(f"    No more data on page {page}")
                     break
                 
-                # Add items up to limit
-                remaining = limit - len(all_data)
-                if len(page_items) <= remaining:
-                    all_data.extend(page_items)
-                else:
-                    all_data.extend(page_items[:remaining])
+                # Add all items from this page
+                all_data.extend(page_items)
                 
                 logger.info(f"    Retrieved {len(page_items)} items (Total: {len(all_data)})")
                 
                 # Check if there are more pages
                 has_more = data.get('has_more', False)
-                if not has_more or len(all_data) >= limit:
+                if not has_more:
+                    logger.info(f"    Reached end of data (has_more=False)")
                     break
                 
                 # Set up pagination for next page
