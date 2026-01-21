@@ -252,6 +252,163 @@ def print_field_summary(endpoint: str, title: str, limit: int = 10):
         print(f"    - {field_name:40s} -> {types_str}")
 
 
+def fetch_all_customers() -> List[Dict]:
+    """
+    Fetch ALL customers from Stripe using pagination.
+    
+    Returns:
+        List of all customer objects
+    """
+    all_customers = []
+    starting_after = None
+    
+    print("\n  Fetching all customers from Stripe...")
+    
+    while True:
+        try:
+            url = f"{STRIPE_API_BASE}/customers"
+            headers = {
+                'Authorization': f'Bearer {STRIPE_API_KEY}',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            params = {'limit': 100}  # Max allowed by Stripe
+            
+            if starting_after:
+                params['starting_after'] = starting_after
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            customers = data.get('data', [])
+            all_customers.extend(customers)
+            
+            print(f"  Progress: Fetched {len(all_customers)} customers so far...", end='\r')
+            
+            # Check if there are more customers
+            if not data.get('has_more', False):
+                break
+            
+            # Get the last customer ID for pagination
+            if customers:
+                starting_after = customers[-1]['id']
+            else:
+                break
+                
+        except requests.exceptions.RequestException as e:
+            print(f"\n  [!] Error fetching customers: {e}")
+            break
+        except Exception as e:
+            print(f"\n  [!] Unexpected error: {e}")
+            break
+    
+    print(f"\n  ✓ Total customers fetched: {len(all_customers)}")
+    return all_customers
+
+
+def analyze_customer_phone_numbers():
+    """
+    Analyze all customers and check which ones have phone numbers.
+    """
+    print_section_header("CUSTOMER PHONE NUMBER ANALYSIS")
+    
+    # Fetch all customers
+    all_customers = fetch_all_customers()
+    
+    if not all_customers:
+        print("\n  [!] No customers found or error occurred")
+        return
+    
+    # Analyze phone numbers
+    customers_with_phone = []
+    customers_without_phone = []
+    phone_fields = ['phone']  # Stripe uses 'phone' field for customer phone numbers
+    
+    print("\n  Analyzing phone number data...")
+    
+    for customer in all_customers:
+        customer_id = customer.get('id', 'Unknown')
+        customer_email = customer.get('email', 'No email')
+        customer_name = customer.get('name', 'No name')
+        phone = customer.get('phone')
+        
+        customer_info = {
+            'id': customer_id,
+            'email': customer_email,
+            'name': customer_name,
+            'phone': phone
+        }
+        
+        # Check if phone exists and is not empty
+        if phone and phone.strip():
+            customers_with_phone.append(customer_info)
+        else:
+            customers_without_phone.append(customer_info)
+    
+    # Display results
+    print("\n" + "=" * 80)
+    print("  RESULTS")
+    print("=" * 80)
+    
+    total_customers = len(all_customers)
+    with_phone_count = len(customers_with_phone)
+    without_phone_count = len(customers_without_phone)
+    
+    print(f"\n  Total Customers:                 {total_customers}")
+    print(f"  Customers WITH phone numbers:    {with_phone_count} ({with_phone_count/total_customers*100:.1f}%)")
+    print(f"  Customers WITHOUT phone numbers: {without_phone_count} ({without_phone_count/total_customers*100:.1f}%)")
+    
+    # Show sample of customers with phone numbers
+    if customers_with_phone:
+        print("\n" + "-" * 80)
+        print("  SAMPLE: Customers WITH Phone Numbers (showing first 10)")
+        print("-" * 80)
+        for i, customer in enumerate(customers_with_phone[:10], 1):
+            print(f"\n  {i}. Customer ID: {customer['id']}")
+            print(f"     Name: {customer['name']}")
+            print(f"     Email: {customer['email']}")
+            print(f"     Phone: {customer['phone']}")
+        
+        if len(customers_with_phone) > 10:
+            print(f"\n  ... and {len(customers_with_phone) - 10} more customers with phone numbers")
+    
+    # Show sample of customers without phone numbers
+    if customers_without_phone:
+        print("\n" + "-" * 80)
+        print("  SAMPLE: Customers WITHOUT Phone Numbers (showing first 10)")
+        print("-" * 80)
+        for i, customer in enumerate(customers_without_phone[:10], 1):
+            print(f"\n  {i}. Customer ID: {customer['id']}")
+            print(f"     Name: {customer['name']}")
+            print(f"     Email: {customer['email']}")
+            print(f"     Phone: {customer['phone'] if customer['phone'] else '(empty)'}")
+        
+        if len(customers_without_phone) > 10:
+            print(f"\n  ... and {len(customers_without_phone) - 10} more customers without phone numbers")
+    
+    print("\n" + "=" * 80)
+    
+    # Save detailed report to file
+    report_filename = f"customer_phone_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    report = {
+        'analysis_date': datetime.now().isoformat(),
+        'total_customers': total_customers,
+        'with_phone_count': with_phone_count,
+        'without_phone_count': without_phone_count,
+        'customers_with_phone': customers_with_phone,
+        'customers_without_phone': customers_without_phone
+    }
+    
+    try:
+        with open(report_filename, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        print(f"\n  ✓ Detailed report saved to: {report_filename}")
+    except Exception as e:
+        print(f"\n  [!] Could not save report: {e}")
+    
+    print("=" * 80 + "\n")
+
+
 def main():
     """
     Main function to explore all Stripe API endpoints.
@@ -259,6 +416,13 @@ def main():
     print("\n" + "=" * 80)
     print("  STRIPE API DATA EXPLORER")
     print("  Comprehensive Analysis of Available Data")
+    print("=" * 80)
+    
+    # Run customer phone number analysis first
+    analyze_customer_phone_numbers()
+    
+    print("\n\n" + "=" * 80)
+    print("  ADDITIONAL ENDPOINT EXPLORATION")
     print("=" * 80)
     
     # Define all endpoints to explore
