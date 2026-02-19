@@ -162,3 +162,47 @@ class StripeClient:
             logger.error(f"Error fetching customer {customer_id}: {str(e)}")
             return None
 
+    def fetch_subscriptions_for_customer(self, customer_id: str) -> List[Dict]:
+        """
+        Fetch subscriptions for a customer with price.product expanded (to get product_id).
+        """
+        url = f"{self.base_url}/subscriptions"
+        params = {
+            'customer': customer_id,
+            'status': 'all',
+            'limit': 100,
+            'expand[]': ['data.items.data.price.product'],
+        }
+        all_subs = []
+        starting_after = None
+        try:
+            while True:
+                if starting_after:
+                    params['starting_after'] = starting_after
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                items = data.get('data', [])
+                all_subs.extend(items)
+                if not data.get('has_more', False) or not items:
+                    break
+                starting_after = items[-1]['id']
+            return all_subs
+        except Exception as e:
+            logger.warning(f"Error fetching subscriptions for {customer_id}: {e}")
+            return []
+
+    @staticmethod
+    def get_product_ids_from_subscription(subscription: Dict) -> List[str]:
+        """Extract product_id(s) from a subscription (price.product can be id or expanded object)."""
+        product_ids = []
+        for item in subscription.get('items', {}).get('data', []):
+            price = item.get('price') or {}
+            product = price.get('product')
+            if isinstance(product, dict):
+                pid = product.get('id')
+                if pid:
+                    product_ids.append(pid)
+            elif isinstance(product, str):
+                product_ids.append(product)
+        return product_ids

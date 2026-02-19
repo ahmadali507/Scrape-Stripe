@@ -10,6 +10,7 @@ from typing import Dict, Any
 
 from stripe_client import StripeClient
 from bigquery_client import BigQueryClient
+from receiver_client import build_ghl_customers, send_new_customers
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -176,7 +177,49 @@ def sync_entity(stripe_client: StripeClient, bq_client: BigQueryClient, entity_t
             last_sync_timestamp=new_last_sync_timestamp
         )
         logger.info(f"  ✓ Metadata updated")
-        
+
+        # Send new customers to GoHighLevel (Replit) — mandatory when we have new customers
+        if entity_type == 'customers' and record_count > 0:
+            try:
+                ghl_customers = build_ghl_customers(stripe_client, stripe_data)
+                if ghl_customers:
+                    if not send_new_customers(ghl_customers):
+                        logger.error("  GoHighLevel webhook not configured or send failed (mandatory)")
+                        bq_client.update_sync_metadata(
+                            entity_type=entity_type,
+                            records_synced=record_count,
+                            sync_started_at=sync_started_at,
+                            sync_completed_at=datetime.utcnow(),
+                            status='failed',
+                            last_sync_timestamp=new_last_sync_timestamp,
+                            error_message='GoHighLevel webhook not configured or send failed'
+                        )
+                        return {
+                            'status': 'failed',
+                            'error': 'GoHighLevel webhook not configured or send failed',
+                            'records_synced': record_count,
+                            'last_sync_timestamp': new_last_sync_timestamp
+                        }
+                    logger.info(f"  ✓ New customers sent to GHL webhook ({len(ghl_customers)} entries)")
+                else:
+                    logger.info(f"  No GHL-valid customers to send (missing email/phone/name)")
+            except Exception as send_err:
+                logger.error(f"  GHL webhook send failed (mandatory): {send_err}", exc_info=True)
+                bq_client.update_sync_metadata(
+                    entity_type=entity_type,
+                    records_synced=record_count,
+                    sync_started_at=sync_started_at,
+                    sync_completed_at=datetime.utcnow(),
+                    status='failed',
+                    error_message=f'GHL webhook send failed: {send_err}'
+                )
+                return {
+                    'status': 'failed',
+                    'error': str(send_err),
+                    'records_synced': record_count,
+                    'last_sync_timestamp': new_last_sync_timestamp
+                }
+
         return {
             'status': 'success',
             'records_synced': record_count,

@@ -51,6 +51,21 @@ echo "  Memory: $MEMORY"
 echo "  Timeout: $TIMEOUT"
 echo ""
 
+# Replit/GoHighLevel webhook (mandatory for new-customer sync)
+REPLIT_WEBHOOK_URL_DEFAULT="https://data-whisperer--samuel447.replit.app/api/webhooks/new-customers"
+REPLIT_URL="${REPLIT_WEBHOOK_URL:-$REPLIT_WEBHOOK_URL_DEFAULT}"
+REPLIT_SECRET="${REPLIT_WEBHOOK_SECRET:-}"
+if [ -z "$REPLIT_SECRET" ]; then
+    echo -e "${YELLOW}Warning: REPLIT_WEBHOOK_SECRET not set.${NC}"
+    echo "  Customer sync will fail when there are new customers until you set it."
+    echo "  Run: export REPLIT_WEBHOOK_SECRET=your-webhook-secret"
+    echo "  Then re-run this script."
+    echo ""
+fi
+
+ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID"
+[ -n "$REPLIT_URL" ] && [ -n "$REPLIT_SECRET" ] && ENV_VARS="$ENV_VARS,REPLIT_WEBHOOK_URL=$REPLIT_URL,REPLIT_WEBHOOK_SECRET=$REPLIT_SECRET"
+
 # Deploy the function
 gcloud functions deploy $FUNCTION_NAME \
     --gen2 \
@@ -63,7 +78,7 @@ gcloud functions deploy $FUNCTION_NAME \
     --service-account=$SERVICE_ACCOUNT \
     --memory=$MEMORY \
     --timeout=$TIMEOUT \
-    --set-env-vars GOOGLE_CLOUD_PROJECT=$PROJECT_ID
+    --set-env-vars "$ENV_VARS"
 
 echo ""
 echo -e "${GREEN}=========================================="
@@ -85,7 +100,7 @@ echo ""
 echo "Or trigger via gcloud:"
 echo "  gcloud functions call $FUNCTION_NAME --region=$REGION --gen2"
 echo ""
-echo "Next step: Set up Cloud Scheduler"
-echo "  ./setup-scheduler.sh"
+echo "Next steps:"
+echo "  Set up Cloud Scheduler: ./setup-scheduler.sh"
 echo ""
 
