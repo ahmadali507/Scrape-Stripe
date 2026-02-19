@@ -82,39 +82,39 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 echo -e "${GREEN}✓ IAM roles assigned${NC}"
 echo ""
 
-# Step 5: Create BigQuery datasets
+# Step 5: Create BigQuery datasets (skip if already exist)
 echo -e "${YELLOW}Step 5: Creating BigQuery datasets${NC}"
 
 # Create stripe_raw dataset
-if bq ls -d $PROJECT_ID:stripe_raw &>/dev/null; then
-    echo -e "${YELLOW}Dataset stripe_raw already exists${NC}"
+if bq show "${PROJECT_ID}:stripe_raw" &>/dev/null; then
+    echo -e "${GREEN}✓ Dataset stripe_raw already exists (skipped)${NC}"
 else
     bq mk --dataset \
         --location=US \
         --description="Raw JSON data from Stripe API" \
-        $PROJECT_ID:stripe_raw
+        "${PROJECT_ID}:stripe_raw"
     echo -e "${GREEN}✓ Created dataset: stripe_raw${NC}"
 fi
 
 # Create stripe_processed dataset
-if bq ls -d $PROJECT_ID:stripe_processed &>/dev/null; then
-    echo -e "${YELLOW}Dataset stripe_processed already exists${NC}"
+if bq show "${PROJECT_ID}:stripe_processed" &>/dev/null; then
+    echo -e "${GREEN}✓ Dataset stripe_processed already exists (skipped)${NC}"
 else
     bq mk --dataset \
         --location=US \
         --description="Processed and flattened Stripe data" \
-        $PROJECT_ID:stripe_processed
+        "${PROJECT_ID}:stripe_processed"
     echo -e "${GREEN}✓ Created dataset: stripe_processed${NC}"
 fi
 
 # Create stripe_metadata dataset
-if bq ls -d $PROJECT_ID:stripe_metadata &>/dev/null; then
-    echo -e "${YELLOW}Dataset stripe_metadata already exists${NC}"
+if bq show "${PROJECT_ID}:stripe_metadata" &>/dev/null; then
+    echo -e "${GREEN}✓ Dataset stripe_metadata already exists (skipped)${NC}"
 else
     bq mk --dataset \
         --location=US \
         --description="Metadata and sync tracking for Stripe pipeline" \
-        $PROJECT_ID:stripe_metadata
+        "${PROJECT_ID}:stripe_metadata"
     echo -e "${GREEN}✓ Created dataset: stripe_metadata${NC}"
 fi
 

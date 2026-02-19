@@ -21,6 +21,9 @@ echo ""
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+# Ensure all scripts in this directory are executable (fixes Permission denied when cloning)
+chmod +x *.sh 2>/dev/null || true
+
 # Check if we're in GCP Cloud Shell
 if [ -z "$GOOGLE_CLOUD_PROJECT" ] && [ -z "$(gcloud config get-value project 2>/dev/null)" ]; then
     echo -e "${RED}Warning: Not in Google Cloud Shell or no project selected${NC}"

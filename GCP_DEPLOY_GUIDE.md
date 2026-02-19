@@ -41,13 +41,15 @@ gcloud config get-value project
 
 ---
 
-## Step 2: Go to the project folder
+## Step 2: Go to the project folder and fix script permissions
 
-Use the repo root (where `cloud-function/` and `gcp-setup/` live):
+Use the repo root (where `cloud-function/` and `gcp-setup/` live). In Cloud Shell or after cloning, scripts may not be executable—run this once:
 
 ```bash
 cd /path/to/Scrape-Stripe
-# Example on Windows:  cd d:\projects\upwork\Samuel\Scrape-Stripe
+# Make all GCP setup scripts executable (avoids "Permission denied")
+chmod +x gcp-setup/*.sh
+# Example on Windows (Git Bash):  chmod +x gcp-setup/*.sh
 ```
 
 ---
@@ -274,6 +276,7 @@ gcloud secrets add-iam-policy-binding replit-webhook-secret --project=$PROJECT_I
 
 ```bash
 cd gcp-setup
+chmod +x *.sh   # if you get "Permission denied"
 ./deploy-function.sh
 ./setup-scheduler.sh
 ```
