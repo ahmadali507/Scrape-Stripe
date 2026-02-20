@@ -169,9 +169,6 @@ class StripeClient:
         url = f"{self.base_url}/subscriptions"
         params = {
             'customer': customer_id,
-            'status': 'all',
-            'limit': 100,
-            'expand[]': ['data.items.data.price.product'],
         }
         all_subs = []
         starting_after = None

@@ -31,10 +31,18 @@ JOB_NAME="stripe-bigquery-daily-sync"
 # Test 1: Verify BigQuery datasets and tables
 echo -e "${BLUE}Test 1: Verifying BigQuery structure...${NC}"
 
-echo "  Checking datasets..."
-DATASETS=$(bq ls --format=csv --max_results=1000 | grep -E "stripe_(raw|processed|metadata)" || true)
+echo "  Checking datasets (project: $PROJECT_ID)..."
+MISSING=0
+for DS in stripe_raw stripe_processed stripe_metadata; do
+    if bq show --project_id="$PROJECT_ID" "${PROJECT_ID}:${DS}" &>/dev/null; then
+        echo -e "    ${GREEN}✓${NC} ${DS}"
+    else
+        echo -e "    ${RED}✗${NC} ${DS} not found"
+        MISSING=1
+    fi
+done
 
-if [ -z "$DATASETS" ]; then
+if [ "$MISSING" -ne 0 ]; then
     echo -e "${RED}  ✗ BigQuery datasets not found${NC}"
     echo "  Run: ./setup.sh"
     exit 1
@@ -43,10 +51,10 @@ else
 fi
 
 echo "  Checking tables..."
-TABLES_COUNT=$(bq ls stripe_raw 2>/dev/null | wc -l || echo 0)
+TABLES_COUNT=$(bq ls --project_id="$PROJECT_ID" stripe_raw 2>/dev/null | wc -l || echo 0)
 
 if [ "$TABLES_COUNT" -lt 2 ]; then
-    echo -e "${RED}  ✗ BigQuery tables not found${NC}"
+    echo -e "${RED}  ✗ BigQuery tables not found in stripe_raw${NC}"
     echo "  Run: ./create-tables.sh"
     exit 1
 else
