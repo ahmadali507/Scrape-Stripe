@@ -289,6 +289,95 @@ curl -X POST $(gcloud functions describe stripe-bigquery-sync --region=us-centra
 
 ---
 
+## Testing the endpoint that sends customers + product_ids to Replit
+
+You can test in two ways: **call Replit directly** with a fake payload, or **trigger the Cloud Function** and rely on real new customers.
+
+### Option A: Test the Replit endpoint directly (curl)
+
+Sends a minimal payload that matches what the pipeline sends. Replace `YOUR_WEBHOOK_SECRET` with your real secret (e.g. `xiomara-big-query-secret`).
+
+```bash
+curl -X POST "https://data-whisperer--samuel447.replit.app/api/webhooks/new-customers" \
+  -H "Content-Type: application/json" \
+  -H "x-webhook-secret: YOUR_WEBHOOK_SECRET" \
+  -H "Authorization: Bearer YOUR_WEBHOOK_SECRET" \
+  -d '{
+    "customers": [
+      {
+        "customer_id": "cus_test123",
+        "email": "test@example.com",
+        "name": "Test User",
+        "phone": "+15551234567",
+        "product_id": "prod_LQjx67EvzQ1PGQ"
+      }
+    ],
+    "tags": []
+  }'
+```
+
+- **200** and a JSON body (e.g. `total`, `created`, `updated`) = Replit accepted the payload.
+- **401** = wrong or missing secret; fix the header/secret.
+- **4xx/5xx** = check Replit logs and expected body format.
+
+### Option B: Test via the Cloud Function (real flow)
+
+1. **Trigger the sync** (so it fetches customers from Stripe and, if there are new ones, sends them to Replit):
+
+   ```bash
+   FUNCTION_URL=$(gcloud functions describe stripe-bigquery-sync --region=us-central1 --gen2 --format='value(serviceConfig.uri)')
+   curl -X POST "$FUNCTION_URL" -H "Content-Type: application/json"
+   ```
+
+2. **Check Cloud Function logs** for the Replit send:
+
+   ```bash
+   gcloud functions logs read stripe-bigquery-sync --region=us-central1 --gen2 --limit=100
+   ```
+
+   Look for:
+   - `"New customers sent to GHL webhook (N entries)"` = payload with customers + product_ids was sent to Replit.
+   - `"GoHighLevel webhook not configured or send failed"` = URL/secret missing or Replit returned an error.
+
+3. **When the send runs:** The function only POSTs to Replit when there are **new customers** in that run (Stripe `created` after `last_sync_timestamp`). If the run had 0 new customers, you won’t see a send. To force a send you’d need at least one new customer in Stripe since the last sync, or temporarily lower the stored `last_sync_timestamp` (advanced).
+
+### Option C: Local script (same payload shape)
+
+From the repo root you can run the script below. It POSTs one fake customer with a `product_id` to your Replit URL (set the secret in the command or in env).
+
+```bash
+# From repo root; set your secret
+export REPLIT_WEBHOOK_SECRET=xiomara-big-query-secret
+
+python -c "
+import requests
+import os
+url = os.getenv('REPLIT_WEBHOOK_URL', 'https://data-whisperer--samuel447.replit.app/api/webhooks/new-customers')
+secret = os.getenv('REPLIT_WEBHOOK_SECRET')
+if not secret:
+    print('Set REPLIT_WEBHOOK_SECRET')
+    exit(1)
+r = requests.post(url, json={
+    'customers': [{
+        'customer_id': 'cus_test',
+        'email': 'test@example.com',
+        'name': 'Test',
+        'phone': '+15551234567',
+        'product_id': 'prod_LQjx67EvzQ1PGQ'
+    }],
+    'tags': []
+}, headers={'Content-Type': 'application/json', 'x-webhook-secret': secret, 'Authorization': f'Bearer {secret}'}, timeout=30)
+print('Status:', r.status_code)
+print('Body:', r.text)
+"
+```
+
+Use **Option A** to confirm Replit accepts the payload and secret; use **Option B** to confirm the full pipeline (Stripe → function → Replit) when there are new customers.
+
+**Script:** From repo root, `scripts/test_replit_webhook.sh` sends one test customer with `product_id` (set `REPLIT_WEBHOOK_SECRET` first).
+
+---
+
 ## If something fails
 
 **Function deploy fails (permissions)**
