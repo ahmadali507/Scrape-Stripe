@@ -1,59 +1,127 @@
 import requests
+import json
 
 # --- CONFIGURATION ---
 BASE_URL = "https://autocare-memberships-832d3.ondigitalocean.app/api"
 
-# 1. SETUP: Define the specific endpoints
-# You must check your Swagger docs for the exact Login path (e.g., /auth/login, /users/login)
-LOGIN_URL = f"{BASE_URL}/login" 
-HISTORY_URL = f"{BASE_URL}/getUserData"
+LOGIN_URL = f"{BASE_URL}/login"
+TIERS_URL = f"{BASE_URL}/v1/marketing/tiers"
+DATA_URL = f"{BASE_URL}/v1/marketing/data"
 
-# 2. CREDENTIALS
-payload = {
-    "email": "api_admin@test.com",  # Replace with actual email
-    "password": "Test1234"         # Replace with actual password
+CREDENTIALS = {
+    "email": "api_admin@test.com",
+    "password": "Test11234"
 }
 
 # --- EXECUTION ---
 
-# 3. START SESSION
-# The 'session' object persists cookies across requests, just like a browser.
-session = requests.Session()
+def get_jwt_token():
+    """Login and return JWT token from response."""
+    print(f"Attempting login to: {LOGIN_URL}...")
+    resp = requests.post(LOGIN_URL, json=CREDENTIALS)
+    if resp.status_code not in [200, 201]:
+        print(f"Login failed. Status: {resp.status_code}")
+        print("Response:", resp.text[:500])
+        return None
+    data = resp.json()
+    # Common JWT response keys
+    token = data.get("token") or data.get("access_token") or data.get("accessToken") or data.get("jwt")
+    if not token:
+        print("Login response (no token found):", json.dumps(data, indent=2))
+        return None
+    print("Login successful. JWT token obtained.")
+    return token
 
-print(f"Attempting login to: {LOGIN_URL}...")
+def fetch_with_auth(url, token):
+    """GET url with Bearer token in Authorization header."""
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, headers=headers)
+    return resp
 
-# 4. LOGIN
-try:
-    login_response = session.post(LOGIN_URL, json=payload)
-    
-    # Check if login was successful (usually 200 or 201)
-    if login_response.status_code in [200, 201]:
-        print("Login Successful!")
-        print(f"Cookies received: {session.cookies.get_dict()}")
-        
-        # 5. GET HISTORY DATA - using session cookies (cookie-based auth)
-        params = {"limit": 10, "page": 1}
-        
-        print(f"\nQuerying History Data from: {HISTORY_URL}...")
-        history_response = session.get(HISTORY_URL, params=params)
-        
-        if history_response.status_code == 200:
-            # Handle both JSON and non-JSON responses
-            content_type = history_response.headers.get("Content-Type", "")
-            if "application/json" in content_type:
-                data = history_response.json()
-                print("Data Retrieved Successfully:")
-                print(data)
-            else:
-                print("Response is not JSON (got HTML or other format).")
-                print("Preview:", history_response.text[:300] + "..." if len(history_response.text) > 300 else history_response.text)
-        else:
-            print(f"Failed to get history. Status: {history_response.status_code}")
-            print("Response:", history_response.text[:500])
-            
+def main():
+    token = get_jwt_token()
+    if not token:
+        return
+
+    # --- v1/marketing/tiers ---
+    print(f"\n{'='*60}")
+    print(f"GET {TIERS_URL}")
+    print("="*60)
+    tiers_resp = fetch_with_auth(TIERS_URL, token)
+    if tiers_resp.status_code != 200:
+        print(f"Tiers request failed. Status: {tiers_resp.status_code}")
+        print("Response:", tiers_resp.text[:500])
     else:
-        print(f"Login Failed. Status: {login_response.status_code}")
-        print("Response:", login_response.text)
+        tiers_data = tiers_resp.json()
+        print("Raw response (tiers):")
+        print(json.dumps(tiers_data, indent=2))
+        analyze_tiers(tiers_data)
 
-except Exception as e:
-    print(f"An error occurred: {e}")
+    # --- v1/marketing/data ---
+    print(f"\n{'='*60}")
+    print(f"GET {DATA_URL}")
+    print("="*60)
+    data_resp = fetch_with_auth(DATA_URL, token)
+    if data_resp.status_code != 200:
+        print(f"Data request failed. Status: {data_resp.status_code}")
+        print("Response:", data_resp.text[:500])
+    else:
+        marketing_data = data_resp.json()
+        data_list = marketing_data.get("data", []) if isinstance(marketing_data, dict) else marketing_data
+        max_show = 15
+        if len(data_list) > max_show:
+            truncated = {**marketing_data, "data": data_list[:max_show]}
+            print("Raw response (marketing data, first %d of %d):" % (max_show, len(data_list)))
+            print(json.dumps(truncated, indent=2))
+            print("... and %d more records." % (len(data_list) - max_show))
+        else:
+            print("Raw response (marketing data):")
+            print(json.dumps(marketing_data, indent=2))
+        analyze_marketing_data(marketing_data)
+
+def analyze_tiers(data):
+    """Summarize structure and content of tiers response."""
+    print("\n--- Tiers analysis ---")
+    if isinstance(data, list):
+        print(f"Type: list with {len(data)} item(s)")
+        for i, item in enumerate(data):
+            if isinstance(item, dict):
+                print(f"  Item {i}: keys = {list(item.keys())}")
+            else:
+                print(f"  Item {i}: {type(item).__name__} = {item}")
+    elif isinstance(data, dict):
+        print(f"Type: dict with keys: {list(data.keys())}")
+        for k, v in data.items():
+            if isinstance(v, list):
+                print(f"  '{k}': list of {len(v)} item(s)")
+            else:
+                print(f"  '{k}': {type(v).__name__}")
+    else:
+        print(f"Type: {type(data).__name__}")
+
+def analyze_marketing_data(data):
+    """Summarize structure and content of marketing data response."""
+    print("\n--- Marketing data analysis ---")
+    if isinstance(data, list):
+        print(f"Type: list with {len(data)} item(s)")
+        for i, item in enumerate(data[:5]):  # first 5
+            if isinstance(item, dict):
+                print(f"  Item {i}: keys = {list(item.keys())}")
+            else:
+                print(f"  Item {i}: {type(item).__name__}")
+        if len(data) > 5:
+            print(f"  ... and {len(data) - 5} more")
+    elif isinstance(data, dict):
+        print(f"Type: dict with keys: {list(data.keys())}")
+        for k, v in data.items():
+            if isinstance(v, list):
+                print(f"  '{k}': list of {len(v)} item(s)")
+            elif isinstance(v, dict):
+                print(f"  '{k}': dict with keys {list(v.keys())[:8]}{'...' if len(v) > 8 else ''}")
+            else:
+                print(f"  '{k}': {type(v).__name__}")
+    else:
+        print(f"Type: {type(data).__name__}")
+
+if __name__ == "__main__":
+    main()

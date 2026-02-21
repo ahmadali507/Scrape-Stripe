@@ -3,6 +3,7 @@ BigQuery client for storing and managing Stripe data
 """
 import json
 import logging
+import os
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 from google.cloud import bigquery
@@ -28,7 +29,14 @@ class BigQueryClient:
         self.raw_dataset = 'stripe_raw'
         self.processed_dataset = 'stripe_processed'
         self.metadata_dataset = 'stripe_metadata'
-        
+        # AutoCare datasets (same project)
+        self.autocare_raw_dataset = 'autocare_raw'
+        self.autocare_processed_dataset = 'autocare_processed'
+        self.autocare_metadata_dataset = 'autocare_metadata'
+        # Unified and BI datasets (updated after all syncs)
+        self.unified_dataset = 'unified'
+        self.bi_dataset = 'bi'
+
         logger.info(f"Initialized BigQuery client for project: {self.project_id}")
     
     def get_last_sync_timestamp(self, entity_type: str) -> Dict[str, Any]:
@@ -338,4 +346,276 @@ class BigQueryClient:
             raise Exception(f"Failed to update sync metadata: {errors}")
         
         logger.info(f"Updated sync metadata for {entity_type}")
+
+    # ---------- AutoCare API (raw + processed) ----------
+
+    def insert_autocare_raw_tiers(self, tiers: List[Dict]) -> None:
+        """Append raw tier JSON to autocare_raw.tiers_raw."""
+        if not tiers:
+            logger.info("No AutoCare tiers to insert")
+            return
+        table_id = f"{self.project_id}.{self.autocare_raw_dataset}.tiers_raw"
+        rows = [
+            {
+                "id": t.get("id", ""),
+                "json_data": json.dumps(t),
+                "ingested_at": datetime.utcnow().isoformat(),
+            }
+            for t in tiers
+        ]
+        errors = self.client.insert_rows_json(table_id, rows)
+        if errors:
+            raise Exception(f"Failed to insert AutoCare raw tiers: {errors}")
+        logger.info(f"Inserted {len(rows)} rows into {table_id}")
+
+    def insert_autocare_raw_marketing_data(self, data: List[Dict]) -> None:
+        """Append raw marketing data (mixed customer/session) to autocare_raw.marketing_data_raw."""
+        if not data:
+            logger.info("No AutoCare marketing data to insert")
+            return
+        table_id = f"{self.project_id}.{self.autocare_raw_dataset}.marketing_data_raw"
+        now = datetime.utcnow().isoformat()
+        rows = []
+        for i, item in enumerate(data):
+            rid = item.get("clientId") or item.get("sessionId") or f"row_{i}"
+            record_type = "session" if item.get("sessionId") else "customer"
+            rows.append({
+                "id": rid,
+                "record_type": record_type,
+                "json_data": json.dumps(item),
+                "ingested_at": now,
+            })
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i : i + batch_size]
+            errors = self.client.insert_rows_json(table_id, batch)
+            if errors:
+                raise Exception(f"Failed to insert AutoCare raw marketing data: {errors}")
+        logger.info(f"Inserted {len(rows)} rows into {table_id}")
+
+    def upsert_autocare_processed_tiers(self, tiers: List[Dict]) -> None:
+        """Replace autocare_processed.tiers with flattened tier data."""
+        if not tiers:
+            logger.info("No AutoCare tiers to process")
+            return
+        table_id = f"{self.project_id}.{self.autocare_processed_dataset}.tiers"
+        try:
+            self.client.query(f"TRUNCATE TABLE `{table_id}`").result()
+        except Exception as e:
+            logger.warning(f"TRUNCATE tiers (may not exist): {e}")
+        meta = lambda t: t.get("metadata") or {}
+        rows = []
+        for t in tiers:
+            m = meta(t)
+            rows.append({
+                "product_id": t.get("id"),
+                "name": t.get("name"),
+                "description": t.get("description"),
+                "product_key": m.get("productKey"),
+                "metadata_order": m.get("order"),
+                "perks": m.get("perks"),
+                "refund_required": m.get("refundRequired"),
+                "external_api_integration": m.get("external_api_integration"),
+                "validation_rules": m.get("validation_rules"),
+                "validation_description": m.get("validation_description"),
+                "taxable_amount": m.get("taxable_amount"),
+                "updated_at": datetime.utcnow().isoformat(),
+                "ingested_at": datetime.utcnow().isoformat(),
+            })
+        errors = self.client.insert_rows_json(table_id, rows)
+        if errors:
+            raise Exception(f"Failed to upsert AutoCare processed tiers: {errors}")
+        logger.info(f"Upserted {len(rows)} rows into {table_id}")
+
+    def upsert_autocare_processed_marketing_data(self, data: List[Dict]) -> None:
+        """Parse marketing data into customers, subscriptions, sessions, cars; replace processed tables."""
+        customers: List[Dict] = []
+        subscriptions: List[Dict] = []
+        sessions: List[Dict] = []
+        cars: List[Dict] = []
+        seen_customers: set = set()
+
+        for item in data:
+            if item.get("sessionId"):
+                loc = item.get("location") or {}
+                sessions.append({
+                    "session_id": item.get("sessionId"),
+                    "client_id": item.get("clientId") or "",
+                    "session_date": item.get("sessionDate"),
+                    "session_type": item.get("sessionType"),
+                    "session_description": item.get("sessionDescription"),
+                    "location_id": loc.get("id"),
+                    "location_name": loc.get("name"),
+                    "location_is_active": loc.get("isActive"),
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "ingested_at": datetime.utcnow().isoformat(),
+                })
+            if item.get("clientId") or item.get("billingID") or item.get("email"):
+                key = (item.get("clientId") or "", item.get("billingID") or "")
+                if key in seen_customers:
+                    pass
+                else:
+                    seen_customers.add(key)
+                    customers.append({
+                        "client_id": item.get("clientId") or "",
+                        "billing_id": item.get("billingID"),
+                        "email": item.get("email"),
+                        "first_name": item.get("firstName"),
+                        "last_name": item.get("lastName"),
+                        "phone_number": item.get("phoneNumber"),
+                        "customer_created_date": item.get("customerCreatedDate"),
+                        "updated_at": datetime.utcnow().isoformat(),
+                        "ingested_at": datetime.utcnow().isoformat(),
+                    })
+                for sub in item.get("subscriptions") or []:
+                    car_ids_str = json.dumps(sub.get("carIds") or [])
+                    subscriptions.append({
+                        "subscription_id": sub.get("id"),
+                        "client_id": item.get("clientId") or "",
+                        "billing_id": item.get("billingID"),
+                        "status": sub.get("status"),
+                        "product_id": sub.get("productId"),
+                        "car_ids": car_ids_str,
+                        "updated_at": datetime.utcnow().isoformat(),
+                        "ingested_at": datetime.utcnow().isoformat(),
+                    })
+                for car in item.get("cars") or []:
+                    if not isinstance(car, dict):
+                        continue
+                    car_id = car.get("id") or car.get("_id") or ""
+                    if not car_id:
+                        continue
+                    cars.append({
+                        "car_id": car_id,
+                        "client_id": item.get("clientId") or "",
+                        "billing_id": item.get("billingID"),
+                        "json_data": json.dumps(car),
+                        "make": car.get("make"),
+                        "model": car.get("model"),
+                        "year": car.get("year"),
+                        "license_plate": car.get("licensePlate") or car.get("license_plate"),
+                        "color": car.get("color"),
+                        "vin": car.get("vin"),
+                        "updated_at": datetime.utcnow().isoformat(),
+                        "ingested_at": datetime.utcnow().isoformat(),
+                    })
+
+        proj = self.project_id
+        ds = self.autocare_processed_dataset
+
+        for table_name, rows in [
+            ("marketing_customers", customers),
+            ("marketing_subscriptions", subscriptions),
+            ("marketing_sessions", sessions),
+            ("marketing_cars", cars),
+        ]:
+            table_id = f"{proj}.{ds}.{table_name}"
+            try:
+                self.client.query(f"TRUNCATE TABLE `{table_id}`").result()
+            except Exception as e:
+                logger.warning(f"TRUNCATE {table_name}: {e}")
+            if not rows:
+                continue
+            batch_size = 500
+            for i in range(0, len(rows), batch_size):
+                errors = self.client.insert_rows_json(table_id, rows[i : i + batch_size])
+                if errors:
+                    raise Exception(f"Failed to insert {table_name}: {errors}")
+            logger.info(f"Upserted {len(rows)} rows into {table_id}")
+
+    def update_autocare_sync_metadata(
+        self,
+        entity_type: str,
+        records_synced: int,
+        sync_started_at: datetime,
+        sync_completed_at: datetime,
+        status: str,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Append a row to autocare_metadata.sync_history."""
+        table_id = f"{self.project_id}.{self.autocare_metadata_dataset}.sync_history"
+        row = {
+            "entity_type": entity_type,
+            "last_sync_timestamp": None,
+            "last_synced_id": None,
+            "records_synced": records_synced,
+            "sync_started_at": sync_started_at.isoformat(),
+            "sync_completed_at": sync_completed_at.isoformat(),
+            "status": status,
+            "error_message": error_message,
+        }
+        errors = self.client.insert_rows_json(table_id, [row])
+        if errors:
+            logger.error(f"Errors updating AutoCare sync metadata: {errors}")
+        else:
+            logger.info(f"Updated AutoCare sync metadata for {entity_type}")
+
+    # ---------- Unified and BI tables (run after all Stripe + AutoCare syncs) ----------
+
+    def refresh_unified_customers(self) -> Dict[str, Any]:
+        """
+        Refresh unified.customers from stripe_processed.unified_customers view.
+        Run after all Stripe and AutoCare syncing is done.
+        """
+        unified_table = f"{self.project_id}.{self.unified_dataset}.customers"
+        view_ref = f"{self.project_id}.{self.processed_dataset}.unified_customers"
+        try:
+            # Ensure unified dataset exists
+            unified_dataset_id = f"{self.project_id}.{self.unified_dataset}"
+            try:
+                self.client.get_dataset(unified_dataset_id)
+            except NotFound:
+                self.client.create_dataset(
+                    bigquery.Dataset(unified_dataset_id),
+                    exists_ok=True,
+                )
+            # Materialize view into unified.customers (view may live in stripe_processed)
+            query = f"""
+            CREATE OR REPLACE TABLE `{unified_table}` AS
+            SELECT * FROM `{view_ref}`
+            """
+            self.client.query(query).result()
+            logger.info(f"Refreshed {unified_table} from {view_ref}")
+            return {"status": "success", "table": unified_table}
+        except Exception as e:
+            logger.error(f"Failed to refresh unified customers: {e}", exc_info=True)
+            return {"status": "failed", "error": str(e), "table": unified_table}
+
+    def _load_bi_snapshot_sql(self) -> str:
+        """Load BI snapshot SQL from file; substitute PROJECT_ID at runtime."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(script_dir, "sql", "create_bi_customer_360_snapshot.sql"),
+            os.path.join(script_dir, "..", "sql", "create_bi_customer_360_snapshot.sql"),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read().replace("PROJECT_ID", self.project_id)
+        raise FileNotFoundError(
+            "create_bi_customer_360_snapshot.sql not found in sql/ or ../sql/"
+        )
+
+    def refresh_bi_customer_360_snapshot(self) -> Dict[str, Any]:
+        """
+        Refresh bi.unified_customer_360_snapshot using full CTE query (latest subs, sessions, cars, counts).
+        Run after unified.customers has been refreshed.
+        """
+        bi_table = f"{self.project_id}.{self.bi_dataset}.unified_customer_360_snapshot"
+        try:
+            bi_dataset_id = f"{self.project_id}.{self.bi_dataset}"
+            try:
+                self.client.get_dataset(bi_dataset_id)
+            except NotFound:
+                self.client.create_dataset(
+                    bigquery.Dataset(bi_dataset_id),
+                    exists_ok=True,
+                )
+            query = self._load_bi_snapshot_sql()
+            self.client.query(query).result()
+            logger.info(f"Refreshed {bi_table} (BI customer 360 snapshot)")
+            return {"status": "success", "table": bi_table}
+        except Exception as e:
+            logger.error(f"Failed to refresh BI snapshot: {e}", exc_info=True)
+            return {"status": "failed", "error": str(e), "table": bi_table}
 

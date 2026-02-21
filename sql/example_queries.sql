@@ -376,3 +376,73 @@ SELECT
   (SELECT COUNT(*) FROM `stripe_processed.invoices`) - 
   (SELECT COUNT(*) FROM `stripe_raw.invoices_raw`);
 
+
+-- ============================================================
+-- UNIFIED CUSTOMERS (Stripe + AutoCare: one row per customer,
+-- with cars, sessions, subscriptions and tiers as arrays)
+-- ============================================================
+-- Requires: create_unified_customer_view.sql applied; autocare_* tables populated.
+
+-- 1. One row per customer with all fields (no duplication)
+SELECT
+  customer_id,
+  email,
+  name,
+  phone,
+  stripe_email,
+  stripe_name,
+  autocare_client_id,
+  autocare_email,
+  autocare_first_name,
+  autocare_last_name,
+  ARRAY_LENGTH(cars) AS car_count,
+  ARRAY_LENGTH(sessions) AS session_count,
+  ARRAY_LENGTH(autocare_subscriptions_with_tiers) AS autocare_sub_count,
+  ARRAY_LENGTH(stripe_subscriptions) AS stripe_sub_count
+FROM `stripe_processed.unified_customers`
+LIMIT 20;
+
+-- 2. Unnest cars for customers that have cars
+SELECT
+  u.customer_id,
+  u.email,
+  u.name,
+  car.car_id,
+  car.make,
+  car.model,
+  car.year,
+  car.license_plate,
+  car.vin,
+  car.car_json_data
+FROM `stripe_processed.unified_customers` u,
+  UNNEST(u.cars) AS car
+WHERE ARRAY_LENGTH(u.cars) > 0;
+
+-- 3. Unnest sessions for customers that have sessions
+SELECT
+  u.customer_id,
+  u.email,
+  s.session_id,
+  s.session_date,
+  s.session_type,
+  s.session_description,
+  s.location_name
+FROM `stripe_processed.unified_customers` u,
+  UNNEST(u.sessions) AS s
+WHERE ARRAY_LENGTH(u.sessions) > 0;
+
+-- 4. Unnest AutoCare subscriptions with tier info
+SELECT
+  u.customer_id,
+  u.email,
+  sub.subscription_id,
+  sub.sub_status,
+  sub.tier_name,
+  sub.tier_product_key,
+  sub.tier_perks,
+  sub.tier_refund_required,
+  sub.sub_car_ids
+FROM `stripe_processed.unified_customers` u,
+  UNNEST(u.autocare_subscriptions_with_tiers) AS sub
+WHERE ARRAY_LENGTH(u.autocare_subscriptions_with_tiers) > 0;
+

@@ -1,7 +1,9 @@
 """
 Stripe to BigQuery Cloud Function
-Entry point for HTTP triggered function that syncs Stripe data to BigQuery
+Entry point for HTTP triggered function that syncs Stripe data to BigQuery.
+Optionally syncs AutoCare API data (v1/marketing/tiers, v1/marketing/data) when sync_autocare=true.
 """
+import os
 import functions_framework
 from flask import Request
 import logging
@@ -11,6 +13,11 @@ from typing import Dict, Any
 from stripe_client import StripeClient
 from bigquery_client import BigQueryClient
 from receiver_client import build_ghl_customers, send_new_customers
+
+try:
+    from autocare_client import AutoCareClient
+except ImportError:
+    AutoCareClient = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,28 +41,42 @@ def sync_handler(request: Request) -> tuple[str, int]:
         logger.info(f"Triggered at: {datetime.utcnow().isoformat()}")
         logger.info("=" * 60)
         
-        # Parse request parameters (optional entity filter)
-        request_json = request.get_json(silent=True)
-        entities = None
-        
-        if request_json and 'entities' in request_json:
-            entities = request_json['entities']
+        # Parse request parameters (optional entity filter, optional AutoCare sync)
+        request_json = request.get_json(silent=True) or {}
+        entities = request_json.get('entities')
+        sync_autocare = request_json.get('sync_autocare') is True
+
+        if entities is not None:
             if isinstance(entities, str):
                 entities = [entities]
             logger.info(f"Syncing specific entities: {entities}")
         else:
             entities = ['customers', 'subscriptions']
             logger.info(f"Syncing all entities: {entities}")
-        
+        if sync_autocare:
+            logger.info("AutoCare sync requested")
+
         # Initialize clients
         stripe_client = StripeClient()
         bq_client = BigQueryClient()
-        
+
         # Sync results
         results = {}
         overall_success = True
-        
-        # Sync each entity type
+
+        # Optional: Sync AutoCare API first (raw + processed into autocare_* datasets)
+        if sync_autocare:
+            try:
+                ac_result = sync_autocare_to_bigquery(bq_client)
+                results['autocare'] = ac_result
+                if ac_result.get('status') != 'success':
+                    overall_success = False
+            except Exception as e:
+                logger.error(f"AutoCare sync failed: {e}", exc_info=True)
+                results['autocare'] = {'status': 'failed', 'error': str(e), 'records_synced': 0}
+                overall_success = False
+
+        # Sync each Stripe entity type
         for entity_type in entities:
             try:
                 logger.info(f"\n--- Syncing {entity_type} ---")
@@ -73,6 +94,24 @@ def sync_handler(request: Request) -> tuple[str, int]:
                     'records_synced': 0
                 }
                 overall_success = False
+
+        # Update unified tables after all Stripe and AutoCare syncing is done
+        try:
+            logger.info("\n--- Updating unified tables (unified.customers + BI snapshot) ---")
+            unified_result = bq_client.refresh_unified_customers()
+            results['unified_customers'] = unified_result
+            if unified_result.get('status') != 'success':
+                overall_success = False
+            bi_result = bq_client.refresh_bi_customer_360_snapshot()
+            results['bi_snapshot'] = bi_result
+            if bi_result.get('status') != 'success':
+                overall_success = False
+            logger.info("  ✓ Unified tables updated")
+        except Exception as e:
+            logger.error(f"Error updating unified tables: {e}", exc_info=True)
+            results['unified_customers'] = {'status': 'failed', 'error': str(e)}
+            results['bi_snapshot'] = {'status': 'failed', 'error': str(e)}
+            overall_success = False
         
         # Build response
         logger.info("\n" + "=" * 60)
@@ -92,10 +131,45 @@ def sync_handler(request: Request) -> tuple[str, int]:
             logger.info(f"  {entity}: {result.get('records_synced', 0)} records - {result.get('status')}")
         
         return (str(response), status_code)
-        
+
     except Exception as e:
         logger.error(f"Fatal error in sync handler: {str(e)}", exc_info=True)
         return (f"Error: {str(e)}", 500)
+
+
+def sync_autocare_to_bigquery(bq_client: BigQueryClient) -> Dict[str, Any]:
+    """
+    Fetch AutoCare tiers + marketing data, write raw and processed to BigQuery.
+    Credentials from env: AUTOCARE_API_EMAIL, AUTOCARE_API_PASSWORD.
+    """
+    if AutoCareClient is None:
+        return {"status": "failed", "error": "autocare_client not available", "records_synced": 0}
+    email = os.getenv("AUTOCARE_API_EMAIL")
+    password = os.getenv("AUTOCARE_API_PASSWORD")
+    if not email or not password:
+        return {"status": "failed", "error": "AUTOCARE_API_EMAIL and AUTOCARE_API_PASSWORD not set", "records_synced": 0}
+    sync_started_at = datetime.utcnow()
+    try:
+        ac = AutoCareClient(email=email, password=password)
+        tiers = ac.get_tiers()
+        bq_client.insert_autocare_raw_tiers(tiers)
+        bq_client.upsert_autocare_processed_tiers(tiers)
+        bq_client.update_autocare_sync_metadata(
+            "autocare_tiers", len(tiers), sync_started_at, datetime.utcnow(), "success"
+        )
+        data = ac.get_marketing_data()
+        bq_client.insert_autocare_raw_marketing_data(data)
+        bq_client.upsert_autocare_processed_marketing_data(data)
+        bq_client.update_autocare_sync_metadata(
+            "autocare_marketing_data", len(data), sync_started_at, datetime.utcnow(), "success"
+        )
+        return {"status": "success", "records_synced": len(tiers) + len(data), "tiers": len(tiers), "marketing_data": len(data)}
+    except Exception as e:
+        logger.exception("AutoCare sync failed")
+        bq_client.update_autocare_sync_metadata(
+            "autocare_marketing_data", 0, sync_started_at, datetime.utcnow(), "failed", error_message=str(e)
+        )
+        return {"status": "failed", "error": str(e), "records_synced": 0}
 
 
 def sync_entity(stripe_client: StripeClient, bq_client: BigQueryClient, entity_type: str) -> Dict[str, Any]:
