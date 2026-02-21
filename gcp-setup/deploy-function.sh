@@ -35,11 +35,19 @@ TIMEOUT="540s"
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SOURCE_DIR="$SCRIPT_DIR/../cloud-function"
+SQL_DIR="$SCRIPT_DIR/../sql"
 
 # Check if source directory exists
 if [ ! -d "$SOURCE_DIR" ]; then
     echo -e "${RED}Error: Cloud Function source directory not found: $SOURCE_DIR${NC}"
     exit 1
+fi
+
+# Copy BI snapshot SQL from single source (sql/) into cloud-function/sql/ for deployment
+mkdir -p "$SOURCE_DIR/sql"
+if [ -f "$SQL_DIR/create_bi_customer_360_snapshot.sql" ]; then
+    cp "$SQL_DIR/create_bi_customer_360_snapshot.sql" "$SOURCE_DIR/sql/"
+    echo -e "${GREEN}✓ BI snapshot SQL copied to cloud-function/sql/${NC}"
 fi
 
 echo -e "${YELLOW}Deploying Cloud Function...${NC}"

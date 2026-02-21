@@ -51,7 +51,7 @@ cd gcp-setup
 ./deploy-function.sh
 ```
 
-This deploys the function from `../cloud-function` (including `cloud-function/sql/` for the BI snapshot). The function will refresh `unified.customers` and `bi.unified_customer_360_snapshot` after each sync.
+This copies the BI snapshot SQL from `sql/` into `cloud-function/sql/`, then deploys the function. The function will refresh `unified.customers` and `bi.unified_customer_360_snapshot` after each sync.
 
 ---
 

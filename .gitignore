@@ -41,6 +41,9 @@ env/
 *~
 .DS_Store
 
+# Deploy-time copy of BI SQL (single source is sql/create_bi_customer_360_snapshot.sql)
+cloud-function/sql/create_bi_customer_360_snapshot.sql
+
 # Output files
 *.csv
 *.xlsx

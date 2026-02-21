@@ -53,9 +53,8 @@ All CTEs are **LEFT JOIN**ed back to `uc` so every customer has one row even whe
 
 ## SQL source
 
-- **Repo (canonical):** `sql/create_bi_customer_360_snapshot.sql`
-- **Cloud Function (bundled):** `cloud-function/sql/create_bi_customer_360_snapshot.sql`  
-  The function substitutes `PROJECT_ID` at runtime when running this SQL.
+- **Single source:** `sql/create_bi_customer_360_snapshot.sql`  
+  The deploy script copies it into `cloud-function/sql/` before deploying so the function can load it at runtime (and substitute `PROJECT_ID`).
 
 ## GCP setup
 
