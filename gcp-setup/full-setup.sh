@@ -4,6 +4,11 @@
 
 set -e
 
+# Optional: set these to pass to deploy (or store in Secret Manager via setup-secrets.sh for a more robust setup)
+export REPLIT_WEBHOOK_SECRET="${REPLIT_WEBHOOK_SECRET:-xiomara-big-query-secret}"
+export AUTOCARE_API_EMAIL="${AUTOCARE_API_EMAIL:-api_admin@test.com}"
+export AUTOCARE_API_PASSWORD="${AUTOCARE_API_PASSWORD:-Test1234}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -78,6 +83,25 @@ echo -e "${YELLOW}STEP 3/8: Creating BigQuery tables${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 ./create-tables.sh
+echo ""
+
+# Step 3b: Create unified_customers view (required before first sync with unified/BI)
+echo -e "${YELLOW}Creating unified_customers view...${NC}"
+PROJECT_ID=$(gcloud config get-value project)
+SQL_DIR="$SCRIPT_DIR/../sql"
+if [ -f "$SQL_DIR/create_unified_customer_view.sql" ]; then
+    if sed "s/PROJECT_ID/${PROJECT_ID}/g" "$SQL_DIR/create_unified_customer_view.sql" | bq query --use_legacy_sql=false --project_id="$PROJECT_ID"; then
+        echo -e "${GREEN}✓ unified_customers view created${NC}"
+    else
+        echo -e "${YELLOW}⚠ View creation failed or already exists. To create manually:${NC}"
+        echo "  1. Replace PROJECT_ID in sql/create_unified_customer_view.sql with $PROJECT_ID"
+        echo "  2. bq query --use_legacy_sql=false --project_id=$PROJECT_ID < sql/create_unified_customer_view.sql"
+    fi
+else
+    echo -e "${YELLOW}⚠ create_unified_customer_view.sql not found; create view manually before first sync:${NC}"
+    echo "  1. Replace PROJECT_ID in sql/create_unified_customer_view.sql with $PROJECT_ID"
+    echo "  2. bq query --use_legacy_sql=false --project_id=$PROJECT_ID < sql/create_unified_customer_view.sql"
+fi
 echo ""
 
 # Step 4: Deploy function

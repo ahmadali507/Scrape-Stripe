@@ -62,13 +62,13 @@ Data is pulled from Stripe and AutoCare only when the Cloud Function runs. Do th
 ### Prerequisites
 
 - **Stripe:** Secret `stripe-api-key` must exist in Secret Manager and the function’s service account must have access. The deploy script sets `GOOGLE_CLOUD_PROJECT` so the function can read it.
-- **AutoCare:** The function needs `AUTOCARE_API_EMAIL` and `AUTOCARE_API_PASSWORD`. Set them when deploying:
-  ```bash
-  export AUTOCARE_API_EMAIL=your-autocare-api-email
-  export AUTOCARE_API_PASSWORD=your-autocare-api-password
-  cd gcp-setup && ./deploy-function.sh
-  ```
-  Or add them later in the Cloud Console (Cloud Functions → your function → Edit → Environment variables).
+- **AutoCare:** The function needs `AUTOCARE_API_EMAIL` and `AUTOCARE_API_PASSWORD`. You can either set them as env vars when deploying, or store them in Secret Manager so you never need to set them again:
+  - **Secret Manager (recommended):** Run `./setup-secrets.sh` (it creates `autocare-api-email` and `autocare-api-password` and grants the function access). Add versions with your values:  
+    `echo -n 'your-email' | gcloud secrets versions add autocare-api-email --data-file=-`  
+    `echo -n 'your-password' | gcloud secrets versions add autocare-api-password --data-file=-`  
+    The function reads these when the env vars are not set.
+  - **Env vars:** Set when deploying or in Cloud Console (Cloud Functions → Edit → Environment variables).
+- **Replit webhook:** Similarly, use Secret Manager secrets `replit-webhook-url` and `replit-webhook-secret` so the function can send new customers without setting env vars at deploy.
 
 ### Trigger a full sync (Stripe + AutoCare)
 

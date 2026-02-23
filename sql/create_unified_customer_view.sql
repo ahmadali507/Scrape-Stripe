@@ -57,7 +57,7 @@ SELECT
   c.phone AS stripe_phone,
   c.created AS stripe_created,
   c.created_timestamp AS stripe_created_timestamp,
-  c.address_line1,a
+  c.address_line1,
   c.address_line2,
   c.address_city,
   c.address_state,

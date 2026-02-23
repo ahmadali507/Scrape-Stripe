@@ -131,3 +131,52 @@ else
 fi
 echo ""
 
+# ---------------------------------------------------------------------------
+# Optional: Replit webhook (replit-webhook-url, replit-webhook-secret)
+# Function reads these when REPLIT_WEBHOOK_URL / REPLIT_WEBHOOK_SECRET env vars are not set.
+# ---------------------------------------------------------------------------
+echo -e "${YELLOW}Optional: Replit webhook secrets (for new-customer webhook)${NC}"
+for SECRET_NAME in replit-webhook-url replit-webhook-secret; do
+    if gcloud secrets describe "$SECRET_NAME" &>/dev/null; then
+        echo -e "${GREEN}  ✓ $SECRET_NAME exists${NC}"
+    else
+        echo -e "${YELLOW}  Creating $SECRET_NAME (add a version with your value later, or set env when deploying)${NC}"
+        gcloud secrets create "$SECRET_NAME" --replication-policy=automatic 2>/dev/null || true
+    fi
+done
+for SECRET_NAME in replit-webhook-url replit-webhook-secret; do
+    gcloud secrets add-iam-policy-binding "$SECRET_NAME" \
+        --member="serviceAccount:$SERVICE_ACCOUNT_EMAIL" \
+        --role="roles/secretmanager.secretAccessor" 2>/dev/null || true
+done
+echo ""
+
+# ---------------------------------------------------------------------------
+# Optional: AutoCare API (autocare-api-email, autocare-api-password)
+# Function reads these when AUTOCARE_API_EMAIL / AUTOCARE_API_PASSWORD env vars are not set.
+# ---------------------------------------------------------------------------
+echo -e "${YELLOW}Optional: AutoCare API secrets (for syncing AutoCare data)${NC}"
+for SECRET_NAME in autocare-api-email autocare-api-password; do
+    if gcloud secrets describe "$SECRET_NAME" &>/dev/null; then
+        echo -e "${GREEN}  ✓ $SECRET_NAME exists${NC}"
+    else
+        echo -e "${YELLOW}  Creating $SECRET_NAME${NC}"
+        gcloud secrets create "$SECRET_NAME" --replication-policy=automatic 2>/dev/null || true
+    fi
+    gcloud secrets add-iam-policy-binding "$SECRET_NAME" \
+        --member="serviceAccount:$SERVICE_ACCOUNT_EMAIL" \
+        --role="roles/secretmanager.secretAccessor" 2>/dev/null || true
+done
+# Add initial versions if env vars are set (so you don't have to set them at deploy time)
+if [ -n "$AUTOCARE_API_EMAIL" ]; then
+    echo -n "$AUTOCARE_API_EMAIL" | gcloud secrets versions add autocare-api-email --data-file=- 2>/dev/null && echo -e "${GREEN}  ✓ autocare-api-email version added${NC}" || true
+fi
+if [ -n "$AUTOCARE_API_PASSWORD" ]; then
+    echo -n "$AUTOCARE_API_PASSWORD" | gcloud secrets versions add autocare-api-password --data-file=- 2>/dev/null && echo -e "${GREEN}  ✓ autocare-api-password version added${NC}" || true
+fi
+echo ""
+echo -e "${GREEN}To add/update Replit or AutoCare secrets later:${NC}"
+echo "  echo -n 'your-value' | gcloud secrets versions add replit-webhook-url --data-file=-"
+echo "  echo -n 'your-value' | gcloud secrets versions add autocare-api-email --data-file=-"
+echo ""
+

@@ -145,17 +145,49 @@ def sync_handler(request: Request) -> tuple[str, int]:
         return (f"Error: {str(e)}", 500)
 
 
+def _get_autocare_credentials() -> tuple:
+    """Get (email, password) from env or Secret Manager. Returns (None, None) if not configured."""
+    email = os.getenv("AUTOCARE_API_EMAIL")
+    password = os.getenv("AUTOCARE_API_PASSWORD")
+    if email and password:
+        return email.strip(), password.strip()
+    project_id = os.getenv("GCP_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
+        return None, None
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        if not email:
+            name = f"projects/{project_id}/secrets/autocare-api-email/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            email = response.payload.data.decode("UTF-8").strip()
+        if not password:
+            name = f"projects/{project_id}/secrets/autocare-api-password/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            password = response.payload.data.decode("UTF-8").strip()
+        if email and password:
+            logger.info("Retrieved AutoCare credentials from Secret Manager")
+        return email or None, password or None
+    except Exception as e:
+        logger.debug("Could not get AutoCare credentials from Secret Manager: %s", e)
+        return email or None, password or None
+
+
 def sync_autocare_to_bigquery(bq_client: BigQueryClient) -> Dict[str, Any]:
     """
     Fetch AutoCare tiers + marketing data, write raw and processed to BigQuery.
-    Credentials from env: AUTOCARE_API_EMAIL, AUTOCARE_API_PASSWORD.
+    Credentials from env (AUTOCARE_API_EMAIL, AUTOCARE_API_PASSWORD) or Secret Manager
+    (autocare-api-email, autocare-api-password).
     """
     if AutoCareClient is None:
         return {"status": "failed", "error": "autocare_client not available", "records_synced": 0}
-    email = os.getenv("AUTOCARE_API_EMAIL")
-    password = os.getenv("AUTOCARE_API_PASSWORD")
+    email, password = _get_autocare_credentials()
     if not email or not password:
-        return {"status": "failed", "error": "AUTOCARE_API_EMAIL and AUTOCARE_API_PASSWORD not set", "records_synced": 0}
+        return {
+            "status": "failed",
+            "error": "AUTOCARE_API_EMAIL and AUTOCARE_API_PASSWORD not set (set env vars or store in Secret Manager: autocare-api-email, autocare-api-password)",
+            "records_synced": 0,
+        }
     sync_started_at = datetime.utcnow()
     try:
         ac = AutoCareClient(email=email, password=password)
