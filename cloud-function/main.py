@@ -102,11 +102,19 @@ def sync_handler(request: Request) -> tuple[str, int]:
             results['unified_customers'] = unified_result
             if unified_result.get('status') != 'success':
                 overall_success = False
-            bi_result = bq_client.refresh_bi_customer_360_snapshot()
-            results['bi_snapshot'] = bi_result
-            if bi_result.get('status') != 'success':
-                overall_success = False
-            logger.info("  ✓ Unified tables updated")
+            # BI snapshot reads from unified.customers — only run if unified refresh succeeded
+            if unified_result.get('status') == 'success':
+                bi_result = bq_client.refresh_bi_customer_360_snapshot()
+                results['bi_snapshot'] = bi_result
+                if bi_result.get('status') != 'success':
+                    overall_success = False
+                logger.info("  ✓ Unified tables updated")
+            else:
+                results['bi_snapshot'] = {
+                    'status': 'skipped',
+                    'error': 'unified.customers not created; run sql/create_unified_customer_view.sql and ensure view exists'
+                }
+                logger.warning("  BI snapshot skipped (unified.customers missing or view not created)")
         except Exception as e:
             logger.error(f"Error updating unified tables: {e}", exc_info=True)
             results['unified_customers'] = {'status': 'failed', 'error': str(e)}

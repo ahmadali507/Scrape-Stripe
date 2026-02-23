@@ -578,8 +578,14 @@ class BigQueryClient:
             logger.info(f"Refreshed {unified_table} from {view_ref}")
             return {"status": "success", "table": unified_table}
         except Exception as e:
+            err_msg = str(e)
+            if "not found" in err_msg.lower() or "notFound" in err_msg:
+                err_msg = (
+                    f"{err_msg} — Create the view first: run sql/create_unified_customer_view.sql "
+                    "(replace PROJECT_ID with your project ID) in BigQuery."
+                )
             logger.error(f"Failed to refresh unified customers: {e}", exc_info=True)
-            return {"status": "failed", "error": str(e), "table": unified_table}
+            return {"status": "failed", "error": err_msg, "table": unified_table}
 
     def _load_bi_snapshot_sql(self) -> str:
         """Load BI snapshot SQL from file; substitute PROJECT_ID at runtime."""

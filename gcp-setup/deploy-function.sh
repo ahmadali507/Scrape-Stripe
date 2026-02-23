@@ -73,6 +73,8 @@ fi
 
 ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID"
 [ -n "$REPLIT_URL" ] && [ -n "$REPLIT_SECRET" ] && ENV_VARS="$ENV_VARS,REPLIT_WEBHOOK_URL=$REPLIT_URL,REPLIT_WEBHOOK_SECRET=$REPLIT_SECRET"
+# AutoCare API (required to populate autocare_* tables; set before running this script to include them)
+[ -n "$AUTOCARE_API_EMAIL" ] && [ -n "$AUTOCARE_API_PASSWORD" ] && ENV_VARS="$ENV_VARS,AUTOCARE_API_EMAIL=$AUTOCARE_API_EMAIL,AUTOCARE_API_PASSWORD=$AUTOCARE_API_PASSWORD"
 
 # Deploy the function
 gcloud functions deploy $FUNCTION_NAME \
@@ -107,6 +109,13 @@ echo "  curl -X POST $FUNCTION_URL"
 echo ""
 echo "Or trigger via gcloud:"
 echo "  gcloud functions call $FUNCTION_NAME --region=$REGION --gen2"
+echo ""
+echo "To populate AutoCare tables, set env and redeploy:"
+echo "  export AUTOCARE_API_EMAIL=your-api-email"
+echo "  export AUTOCARE_API_PASSWORD=your-api-password"
+echo "  ./deploy-function.sh"
+echo ""
+echo "Then trigger sync with AutoCare: curl -X POST $FUNCTION_URL -H 'Content-Type: application/json' -d '{\"sync_autocare\": true}'"
 echo ""
 echo "Next steps:"
 echo "  Set up Cloud Scheduler: ./setup-scheduler.sh"
