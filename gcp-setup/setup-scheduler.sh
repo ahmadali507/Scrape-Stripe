@@ -46,6 +46,7 @@ fi
 echo "Function URL: $FUNCTION_URL"
 echo ""
 
+# Every run syncs both Stripe and AutoCare (no body needed; function always runs both)
 # Check if job already exists
 if gcloud scheduler jobs describe $JOB_NAME --location=$REGION &>/dev/null; then
     echo -e "${YELLOW}Scheduler job already exists. Updating...${NC}"
@@ -55,6 +56,7 @@ if gcloud scheduler jobs describe $JOB_NAME --location=$REGION &>/dev/null; then
         --schedule="$SCHEDULE" \
         --uri="$FUNCTION_URL" \
         --http-method=POST \
+        --clear-message-body \
         --time-zone="$TIME_ZONE" \
         --attempt-deadline=540s \
         --max-retry-attempts=3 \
@@ -75,7 +77,7 @@ else
         --max-retry-attempts=3 \
         --max-backoff=3600s \
         --min-backoff=60s \
-        --description="Daily sync of Stripe data to BigQuery at 6:00 AM UTC"
+        --description="Daily sync of Stripe + AutoCare to BigQuery at 6:00 AM UTC"
     
     echo -e "${GREEN}✓ Scheduler job created${NC}"
 fi
@@ -87,6 +89,7 @@ echo "==========================================${NC}"
 echo ""
 echo "Job Name: $JOB_NAME"
 echo "Schedule: $SCHEDULE ($TIME_ZONE)"
+echo "Each run syncs both Stripe and AutoCare (no request body needed)"
 echo "Next Run: 6:00 AM UTC daily"
 echo ""
 echo "To run the job manually:"

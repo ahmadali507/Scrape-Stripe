@@ -1,7 +1,7 @@
 """
 Stripe to BigQuery Cloud Function
-Entry point for HTTP triggered function that syncs Stripe data to BigQuery.
-Optionally syncs AutoCare API data (v1/marketing/tiers, v1/marketing/data) when sync_autocare=true.
+Entry point for HTTP triggered function that syncs Stripe + AutoCare data to BigQuery.
+Every run syncs both: AutoCare (tiers + marketing data) first, then Stripe (customers, subscriptions), then unified/BI tables.
 """
 import os
 import functions_framework
@@ -41,20 +41,17 @@ def sync_handler(request: Request) -> tuple[str, int]:
         logger.info(f"Triggered at: {datetime.utcnow().isoformat()}")
         logger.info("=" * 60)
         
-        # Parse request parameters (optional entity filter, optional AutoCare sync)
+        # Parse request parameters (optional entity filter only; AutoCare always runs)
         request_json = request.get_json(silent=True) or {}
         entities = request_json.get('entities')
-        sync_autocare = request_json.get('sync_autocare') is True
 
         if entities is not None:
             if isinstance(entities, str):
                 entities = [entities]
-            logger.info(f"Syncing specific entities: {entities}")
+            logger.info(f"Syncing specific Stripe entities: {entities}")
         else:
             entities = ['customers', 'subscriptions']
-            logger.info(f"Syncing all entities: {entities}")
-        if sync_autocare:
-            logger.info("AutoCare sync requested")
+            logger.info(f"Syncing Stripe entities: {entities}")
 
         # Initialize clients
         stripe_client = StripeClient()
@@ -64,17 +61,17 @@ def sync_handler(request: Request) -> tuple[str, int]:
         results = {}
         overall_success = True
 
-        # Optional: Sync AutoCare API first (raw + processed into autocare_* datasets)
-        if sync_autocare:
-            try:
-                ac_result = sync_autocare_to_bigquery(bq_client)
-                results['autocare'] = ac_result
-                if ac_result.get('status') != 'success':
-                    overall_success = False
-            except Exception as e:
-                logger.error(f"AutoCare sync failed: {e}", exc_info=True)
-                results['autocare'] = {'status': 'failed', 'error': str(e), 'records_synced': 0}
+        # Always sync AutoCare first (tiers + marketing data → autocare_* datasets)
+        try:
+            logger.info("\n--- Syncing AutoCare (tiers + marketing data) ---")
+            ac_result = sync_autocare_to_bigquery(bq_client)
+            results['autocare'] = ac_result
+            if ac_result.get('status') != 'success':
                 overall_success = False
+        except Exception as e:
+            logger.error(f"AutoCare sync failed: {e}", exc_info=True)
+            results['autocare'] = {'status': 'failed', 'error': str(e), 'records_synced': 0}
+            overall_success = False
 
         # Sync each Stripe entity type
         for entity_type in entities:
@@ -192,12 +189,19 @@ def sync_autocare_to_bigquery(bq_client: BigQueryClient) -> Dict[str, Any]:
     try:
         ac = AutoCareClient(email=email, password=password)
         tiers = ac.get_tiers()
+        data = ac.get_marketing_data()
+        if len(tiers) == 0 and len(data) == 0:
+            logger.warning(
+                "AutoCare API returned 0 tiers and 0 marketing records. "
+                "Check credentials (AUTOCARE_API_EMAIL / autocare-api-email) and that the API has data."
+            )
+        else:
+            logger.info(f"AutoCare API returned {len(tiers)} tiers, {len(data)} marketing records")
         bq_client.insert_autocare_raw_tiers(tiers)
         bq_client.upsert_autocare_processed_tiers(tiers)
         bq_client.update_autocare_sync_metadata(
             "autocare_tiers", len(tiers), sync_started_at, datetime.utcnow(), "success"
         )
-        data = ac.get_marketing_data()
         bq_client.insert_autocare_raw_marketing_data(data)
         bq_client.upsert_autocare_processed_marketing_data(data)
         bq_client.update_autocare_sync_metadata(

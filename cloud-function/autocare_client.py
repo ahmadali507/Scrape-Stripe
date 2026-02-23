@@ -65,9 +65,15 @@ class AutoCareClient:
         resp.raise_for_status()
         body = resp.json()
         if isinstance(body, dict) and "data" in body:
-            return body["data"]
+            out = body["data"] if isinstance(body["data"], list) else []
+            if len(out) == 0:
+                logger.info("get_tiers: API returned data=[] (empty list)")
+            return out
         if isinstance(body, list):
+            if len(body) == 0:
+                logger.info("get_tiers: API returned empty list")
             return body
+        logger.warning("get_tiers: unexpected response keys=%s", list(body.keys()) if isinstance(body, dict) else type(body).__name__)
         return []
 
     def get_marketing_data(self) -> List[Dict[str, Any]]:
@@ -81,7 +87,13 @@ class AutoCareClient:
         resp.raise_for_status()
         body = resp.json()
         if isinstance(body, dict) and "data" in body:
-            return body["data"]
+            out = body["data"] if isinstance(body["data"], list) else []
+            if len(out) == 0:
+                logger.info("get_marketing_data: API returned data=[] (empty list)")
+            return out
         if isinstance(body, list):
+            if len(body) == 0:
+                logger.info("get_marketing_data: API returned empty list")
             return body
+        logger.warning("get_marketing_data: unexpected response keys=%s", list(body.keys()) if isinstance(body, dict) else type(body).__name__)
         return []

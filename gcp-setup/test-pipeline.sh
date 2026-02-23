@@ -100,9 +100,9 @@ echo -e "${BLUE}Test 4: Triggering Cloud Function manually...${NC}"
 echo "  This may take up to 9 minutes..."
 echo ""
 
-# Trigger the function
-echo "  Invoking function..."
-RESPONSE=$(curl -s -X POST $FUNCTION_URL -H "Content-Type: application/json" -d '{"entities": ["customers"]}' -w "\n%{http_code}")
+# Trigger the function (every run syncs both Stripe and AutoCare)
+echo "  Invoking function (Stripe + AutoCare)..."
+RESPONSE=$(curl -s -X POST "$FUNCTION_URL" -H "Content-Type: application/json" -w "\n%{http_code}")
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
 BODY=$(echo "$RESPONSE" | head -n -1)
@@ -145,14 +145,24 @@ echo "  Checking processed subscriptions..."
 SUBS_PROC_COUNT=$(bq query --use_legacy_sql=false --format=csv \
     "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.stripe_processed.subscriptions\`" \
     | tail -n 1 || echo "0")
-
 echo "  Processed subscriptions: $SUBS_PROC_COUNT"
 
+echo "  Checking AutoCare tiers..."
+TIERS_RAW_COUNT=$(bq query --use_legacy_sql=false --format=csv \
+    "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.autocare_raw.tiers_raw\`" \
+    2>/dev/null | tail -n 1 || echo "0")
+echo "  AutoCare tiers_raw: $TIERS_RAW_COUNT"
+
 if [ "$CUSTOMERS_PROC_COUNT" -gt 0 ] || [ "$SUBS_PROC_COUNT" -gt 0 ]; then
-    echo -e "${GREEN}  ✓ Data found in BigQuery tables${NC}"
+    echo -e "${GREEN}  ✓ Data found in Stripe BigQuery tables${NC}"
 else
-    echo -e "${YELLOW}  ⚠ No data in processed tables yet${NC}"
+    echo -e "${YELLOW}  ⚠ No data in Stripe processed tables yet${NC}"
     echo "  This is normal if you have no Stripe data or first sync hasn't completed"
+fi
+if [ "$TIERS_RAW_COUNT" -gt 0 ]; then
+    echo -e "${GREEN}  ✓ AutoCare data found (tiers_raw)${NC}"
+else
+    echo -e "${YELLOW}  ⚠ No AutoCare data yet. Check credentials (AUTOCARE_API_EMAIL / autocare-api-email) and Cloud Function logs.${NC}"
 fi
 
 echo ""
