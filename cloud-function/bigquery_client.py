@@ -691,7 +691,7 @@ class BigQueryClient:
 
               -- Stripe verification fields (no contact info — Stripe is secondary)
               s.customer_id                                       AS stripe_customer_id,
-              s.created_timestamp                                 AS stripe_customer_since,
+              s.created                                           AS stripe_customer_since,
               s.currency                                          AS stripe_currency,
               s.email                                             AS stripe_email,
               s.name                                              AS stripe_name,
