@@ -17,7 +17,7 @@ WITH
       phone,
       stripe_created AS customer_since,
       autocare_customer_created_date AS autocare_created_at,
-      GREATEST(COALESCE(stripe_updated_at, TIMESTAMP('1970-01-01')), COALESCE(autocare_updated_at, TIMESTAMP('1970-01-01'))) AS last_synced_at
+      autocare_updated_at AS last_synced_at
     FROM `PROJECT_ID.unified.customers`
   ),
   latest_stripe_sub AS (
