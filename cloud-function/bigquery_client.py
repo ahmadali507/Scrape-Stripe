@@ -554,135 +554,182 @@ class BigQueryClient:
 
     def refresh_unified_customers(self) -> Dict[str, Any]:
         """
-        Refresh unified.customers by running a fully de-correlated JOIN query.
-        Does not rely on any view; avoids BigQuery's correlated subquery restriction.
-        Run after all Stripe and AutoCare syncing is done.
+        Refresh unified.customers.
+        Driving table: autocare_processed.marketing_customers (source of truth).
+        INNER JOIN stripe_processed.customers on billing_id = customer_id so only
+        customers that exist in BOTH systems are included — no pure-Stripe rows.
+        All identity/contact fields come from AutoCare; Stripe provides payment/
+        address/subscription data only.
         """
         unified_table = f"{self.project_id}.{self.unified_dataset}.customers"
         p = self.project_id
         sp = self.processed_dataset            # stripe_processed
         acp = self.autocare_processed_dataset  # autocare_processed
         try:
-            # Ensure unified dataset exists
             unified_dataset_id = f"{p}.{self.unified_dataset}"
             try:
                 self.client.get_dataset(unified_dataset_id)
             except NotFound:
                 self.client.create_dataset(bigquery.Dataset(unified_dataset_id), exists_ok=True)
 
-            # De-correlated query: pre-aggregate cars / sessions / AC subs into CTEs,
-            # then LEFT JOIN — BigQuery handles this without correlated-subquery errors.
             query = f"""
             CREATE OR REPLACE TABLE `{unified_table}` AS
             WITH
-              m AS (
-                SELECT
-                  billing_id, client_id,
-                  email          AS autocare_email,
-                  first_name     AS autocare_first_name,
-                  last_name      AS autocare_last_name,
-                  phone_number   AS autocare_phone,
-                  customer_created_date AS autocare_customer_created_date,
-                  updated_at     AS autocare_updated_at,
-                  ingested_at    AS autocare_ingested_at
-                FROM `{p}.{acp}.marketing_customers`
-              ),
+              -- Pre-aggregate Stripe subscriptions per customer (no correlated subqueries)
               stripe_subs AS (
                 SELECT
                   customer_id,
                   ARRAY_AGG(STRUCT(
-                    subscription_id, object_type AS sub_object_type, status AS sub_status,
-                    created AS sub_created, current_period_start, current_period_end,
-                    cancel_at_period_end, canceled_at, ended_at, currency AS sub_currency,
-                    amount AS sub_amount, subscription_interval, interval_count,
-                    plan_name, plan_id, product_id AS stripe_product_id, collection_method,
-                    updated_at AS sub_updated_at, ingested_at AS sub_ingested_at
+                    subscription_id,
+                    status          AS sub_status,
+                    plan_name, plan_id,
+                    product_id      AS stripe_product_id,
+                    amount          AS sub_amount,
+                    currency        AS sub_currency,
+                    subscription_interval,
+                    interval_count,
+                    current_period_start,
+                    current_period_end,
+                    cancel_at_period_end,
+                    canceled_at,
+                    ended_at,
+                    collection_method,
+                    created         AS sub_created,
+                    updated_at      AS sub_updated_at
                   ) ORDER BY created DESC) AS stripe_subscriptions
                 FROM `{p}.{sp}.subscriptions`
                 GROUP BY customer_id
               ),
-              ac_cars AS (
+              -- Distinct Stripe product IDs per customer
+              stripe_product_ids AS (
                 SELECT
-                  billing_id,
-                  ARRAY_AGG(STRUCT(
-                    car_id, client_id AS car_client_id, billing_id AS car_billing_id,
-                    json_data AS car_json_data, make, model, year, license_plate,
-                    color, vin, updated_at AS car_updated_at, ingested_at AS car_ingested_at
-                  ) ORDER BY car_id) AS cars
-                FROM `{p}.{acp}.marketing_cars`
-                GROUP BY billing_id
+                  customer_id,
+                  ARRAY_AGG(DISTINCT product_id IGNORE NULLS) AS stripe_product_ids
+                FROM `{p}.{sp}.subscriptions`
+                GROUP BY customer_id
               ),
-              ac_sessions AS (
+              -- Current (latest active, then latest) AutoCare tier per customer
+              current_tier AS (
                 SELECT
-                  client_id,
-                  ARRAY_AGG(STRUCT(
-                    session_id, client_id AS session_client_id, session_date,
-                    session_type, session_description, location_id, location_name,
-                    location_is_active, updated_at AS session_updated_at, ingested_at AS session_ingested_at
-                  ) ORDER BY session_date DESC) AS sessions
-                FROM `{p}.{acp}.marketing_sessions`
-                GROUP BY client_id
+                  sub.billing_id,
+                  t.product_id AS current_tier_product_id,
+                  t.name       AS current_tier_name,
+                  t.product_key AS current_tier_key,
+                  t.perks      AS current_tier_perks
+                FROM (
+                  SELECT
+                    billing_id, product_id,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY billing_id
+                      ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, updated_at DESC
+                    ) AS rn
+                  FROM `{p}.{acp}.marketing_subscriptions`
+                ) sub
+                LEFT JOIN `{p}.{acp}.tiers` t ON t.product_id = sub.product_id
+                WHERE sub.rn = 1
               ),
+              -- AutoCare subscriptions array with tier data joined in
               ac_subs AS (
                 SELECT
                   sub.billing_id,
                   ARRAY_AGG(STRUCT(
-                    sub.subscription_id, sub.client_id AS sub_client_id,
-                    sub.billing_id AS sub_billing_id, sub.status AS sub_status,
-                    sub.product_id AS sub_product_id, sub.car_ids AS sub_car_ids,
-                    sub.updated_at AS sub_updated_at, sub.ingested_at AS sub_ingested_at,
-                    t.product_id AS tier_product_id, t.name AS tier_name,
-                    t.description AS tier_description, t.product_key AS tier_product_key,
-                    t.metadata_order AS tier_order, t.perks AS tier_perks,
-                    t.refund_required AS tier_refund_required,
-                    t.external_api_integration AS tier_external_api_integration,
-                    t.validation_rules AS tier_validation_rules,
-                    t.validation_description AS tier_validation_description,
-                    t.taxable_amount AS tier_taxable_amount,
-                    t.updated_at AS tier_updated_at, t.ingested_at AS tier_ingested_at
-                  ) ORDER BY sub.subscription_id) AS autocare_subscriptions_with_tiers
+                    sub.subscription_id,
+                    sub.status          AS sub_status,
+                    sub.product_id      AS sub_product_id,
+                    sub.car_ids         AS sub_car_ids,
+                    t.name              AS tier_name,
+                    t.product_key       AS tier_key,
+                    t.description       AS tier_description,
+                    t.perks             AS tier_perks,
+                    t.taxable_amount    AS tier_taxable_amount,
+                    sub.updated_at      AS sub_updated_at,
+                    sub.ingested_at     AS sub_ingested_at
+                  ) ORDER BY sub.subscription_id) AS autocare_subscriptions
                 FROM `{p}.{acp}.marketing_subscriptions` sub
                 LEFT JOIN `{p}.{acp}.tiers` t ON t.product_id = sub.product_id
                 GROUP BY sub.billing_id
+              ),
+              -- Cars per customer
+              ac_cars AS (
+                SELECT
+                  billing_id,
+                  ARRAY_AGG(STRUCT(
+                    car_id, make, model, year, license_plate, color, vin,
+                    updated_at AS car_updated_at, ingested_at AS car_ingested_at
+                  ) ORDER BY car_id) AS cars
+                FROM `{p}.{acp}.marketing_cars`
+                GROUP BY billing_id
+              ),
+              -- Sessions per customer (most recent first)
+              ac_sessions AS (
+                SELECT
+                  client_id,
+                  ARRAY_AGG(STRUCT(
+                    session_id, session_date, session_type, session_description,
+                    location_id, location_name, location_is_active,
+                    updated_at AS session_updated_at, ingested_at AS session_ingested_at
+                  ) ORDER BY session_date DESC) AS sessions
+                FROM `{p}.{acp}.marketing_sessions`
+                GROUP BY client_id
               )
             SELECT
-              c.customer_id,
-              c.object_type            AS stripe_object_type,
-              c.email                  AS stripe_email,
-              c.name                   AS stripe_name,
-              c.description            AS stripe_description,
-              c.phone                  AS stripe_phone,
-              c.created                AS stripe_created,
-              c.created_timestamp      AS stripe_created_timestamp,
-              c.address_line1, c.address_line2, c.address_city,
-              c.address_state, c.address_postal_code, c.address_country,
-              c.currency               AS stripe_currency,
-              m.client_id              AS autocare_client_id,
-              m.autocare_email,
-              m.autocare_first_name,
-              m.autocare_last_name,
-              m.autocare_phone,
-              m.autocare_customer_created_date,
-              m.autocare_updated_at,
-              m.autocare_ingested_at,
-              COALESCE(c.email, m.autocare_email) AS email,
-              COALESCE(c.name, TRIM(CONCAT(
-                COALESCE(m.autocare_first_name, ''), ' ', COALESCE(m.autocare_last_name, '')
-              ))) AS name,
-              COALESCE(c.phone, m.autocare_phone) AS phone,
+              -- Primary identifiers (AutoCare is source of truth)
+              ac.client_id                                        AS autocare_client_id,
+              ac.billing_id,
+
+              -- Customer profile — all from AutoCare
+              ac.email,
+              ac.first_name,
+              ac.last_name,
+              TRIM(CONCAT(
+                COALESCE(ac.first_name, ''), ' ', COALESCE(ac.last_name, '')
+              ))                                                  AS full_name,
+              ac.phone_number,
+              ac.customer_created_date                            AS autocare_customer_since,
+              ac.updated_at                                       AS autocare_updated_at,
+              ac.ingested_at                                      AS autocare_ingested_at,
+
+              -- Stripe verification fields (no contact info — Stripe is secondary)
+              s.customer_id                                       AS stripe_customer_id,
+              s.created_timestamp                                 AS stripe_customer_since,
+              s.currency                                          AS stripe_currency,
+              s.email                                             AS stripe_email,
+              s.name                                              AS stripe_name,
+              s.description                                       AS stripe_description,
+              s.phone                                             AS stripe_phone,
+              s.address_line1, s.address_line2, s.address_city,
+              s.address_state, s.address_postal_code, s.address_country,
+
+              -- Current membership tier (derived from latest active AutoCare subscription)
+              ct.current_tier_product_id,
+              ct.current_tier_name,
+              ct.current_tier_key,
+              ct.current_tier_perks,
+
+              -- Stripe subscriptions + product IDs
               COALESCE(ss.stripe_subscriptions, [])               AS stripe_subscriptions,
+              COALESCE(spids.stripe_product_ids, [])              AS stripe_product_ids,
+
+              -- AutoCare arrays
+              COALESCE(asubs.autocare_subscriptions, [])          AS autocare_subscriptions,
               COALESCE(cars.cars, [])                             AS cars,
               COALESCE(sess.sessions, [])                         AS sessions,
-              COALESCE(asubs.autocare_subscriptions_with_tiers, []) AS autocare_subscriptions_with_tiers
-            FROM `{p}.{sp}.customers` c
-            LEFT JOIN m      ON m.billing_id      = c.customer_id
-            LEFT JOIN stripe_subs ss ON ss.customer_id = c.customer_id
-            LEFT JOIN ac_cars  cars  ON cars.billing_id  = c.customer_id
-            LEFT JOIN ac_sessions sess ON sess.client_id = m.client_id
-            LEFT JOIN ac_subs  asubs  ON asubs.billing_id = c.customer_id
+
+              -- Metadata
+              CURRENT_TIMESTAMP()                                 AS unified_refreshed_at
+
+            -- AutoCare drives; INNER JOIN ensures only customers in BOTH systems appear
+            FROM `{p}.{acp}.marketing_customers` ac
+            INNER JOIN `{p}.{sp}.customers` s      ON s.customer_id    = ac.billing_id
+            LEFT JOIN  stripe_subs        ss        ON ss.customer_id   = ac.billing_id
+            LEFT JOIN  stripe_product_ids spids     ON spids.customer_id = ac.billing_id
+            LEFT JOIN  current_tier       ct        ON ct.billing_id    = ac.billing_id
+            LEFT JOIN  ac_subs            asubs     ON asubs.billing_id = ac.billing_id
+            LEFT JOIN  ac_cars            cars      ON cars.billing_id  = ac.billing_id
+            LEFT JOIN  ac_sessions        sess      ON sess.client_id   = ac.client_id
             """
             self.client.query(query).result()
-            logger.info(f"Refreshed {unified_table}")
+            logger.info(f"Refreshed {unified_table} — driven by AutoCare customers INNER JOIN Stripe")
             return {"status": "success", "table": unified_table}
         except Exception as e:
             logger.error(f"Failed to refresh unified customers: {e}", exc_info=True)
