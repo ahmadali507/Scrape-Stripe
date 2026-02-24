@@ -33,33 +33,64 @@ echo -e "${BLUE}Test 1: Verifying BigQuery structure...${NC}"
 
 echo "  Checking datasets (project: $PROJECT_ID)..."
 MISSING=0
-for DS in stripe_raw stripe_processed stripe_metadata; do
+for DS in stripe_raw stripe_processed stripe_metadata autocare_raw autocare_processed autocare_metadata unified bi; do
     if bq show --project_id="$PROJECT_ID" "${PROJECT_ID}:${DS}" &>/dev/null; then
         echo -e "    ${GREEN}✓${NC} ${DS}"
     else
-        echo -e "    ${RED}✗${NC} ${DS} not found"
+        echo -e "    ${RED}✗${NC} ${DS} — not found"
         MISSING=1
     fi
 done
 
 if [ "$MISSING" -ne 0 ]; then
-    echo -e "${RED}  ✗ BigQuery datasets not found${NC}"
-    echo "  Run: ./setup.sh"
+    echo -e "${RED}  ✗ One or more BigQuery datasets missing. Run: ./create-tables.sh${NC}"
     exit 1
 else
-    echo -e "${GREEN}  ✓ BigQuery datasets found${NC}"
+    echo -e "${GREEN}  ✓ All BigQuery datasets found${NC}"
 fi
 
-echo "  Checking tables..."
+echo "  Checking Stripe tables..."
 TABLES_COUNT=$(bq ls --project_id="$PROJECT_ID" stripe_raw 2>/dev/null | wc -l || echo 0)
-
 if [ "$TABLES_COUNT" -lt 2 ]; then
-    echo -e "${RED}  ✗ BigQuery tables not found in stripe_raw${NC}"
-    echo "  Run: ./create-tables.sh"
+    echo -e "${RED}  ✗ stripe_raw tables missing. Run: ./create-tables.sh${NC}"
     exit 1
 else
-    echo -e "${GREEN}  ✓ BigQuery tables found${NC}"
+    echo -e "${GREEN}  ✓ stripe_raw tables found${NC}"
 fi
+
+echo "  Checking AutoCare tables..."
+AC_TABLES_OK=1
+for TBL in tiers_raw marketing_data_raw; do
+    if bq show --project_id="$PROJECT_ID" "autocare_raw.${TBL}" &>/dev/null; then
+        echo -e "    ${GREEN}✓${NC} autocare_raw.${TBL}"
+    else
+        echo -e "    ${RED}✗${NC} autocare_raw.${TBL} — not found"
+        AC_TABLES_OK=0
+    fi
+done
+for TBL in tiers marketing_customers marketing_subscriptions marketing_sessions marketing_cars; do
+    if bq show --project_id="$PROJECT_ID" "autocare_processed.${TBL}" &>/dev/null; then
+        echo -e "    ${GREEN}✓${NC} autocare_processed.${TBL}"
+    else
+        echo -e "    ${RED}✗${NC} autocare_processed.${TBL} — not found"
+        AC_TABLES_OK=0
+    fi
+done
+if [ "$AC_TABLES_OK" -eq 1 ]; then
+    echo -e "${GREEN}  ✓ AutoCare tables found${NC}"
+else
+    echo -e "${RED}  ✗ Some AutoCare tables missing. Run: ./create-tables.sh${NC}"
+    exit 1
+fi
+
+echo "  Checking unified / BI tables (populated after first sync — warning only)..."
+for TBL_SPEC in "unified.customers" "bi.unified_customer_360_snapshot"; do
+    if bq show --project_id="$PROJECT_ID" "${TBL_SPEC}" &>/dev/null; then
+        echo -e "    ${GREEN}✓${NC} ${TBL_SPEC}"
+    else
+        echo -e "    ${YELLOW}⚠${NC} ${TBL_SPEC} — not yet populated (created by Cloud Function on first sync)"
+    fi
+done
 
 echo ""
 
@@ -120,49 +151,69 @@ echo ""
 # Test 5: Check data in BigQuery
 echo -e "${BLUE}Test 5: Checking data in BigQuery...${NC}"
 
-echo "  Checking sync history..."
-SYNC_COUNT=$(bq query --use_legacy_sql=false --format=csv \
-    "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.stripe_metadata.sync_history\`" \
-    | tail -n 1)
+bq_count() {
+    bq query --use_legacy_sql=false --format=csv \
+        "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.$1\`" \
+        2>/dev/null | tail -n 1 || echo "0"
+}
 
-echo "  Sync history records: $SYNC_COUNT"
+echo "  --- Stripe ---"
+SYNC_COUNT=$(bq_count "stripe_metadata.sync_history")
+echo "  stripe_metadata.sync_history:        $SYNC_COUNT rows"
 
-echo "  Checking raw customers..."
-CUSTOMERS_RAW_COUNT=$(bq query --use_legacy_sql=false --format=csv \
-    "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.stripe_raw.customers_raw\`" \
-    | tail -n 1 || echo "0")
+CUSTOMERS_RAW_COUNT=$(bq_count "stripe_raw.customers_raw")
+echo "  stripe_raw.customers_raw:            $CUSTOMERS_RAW_COUNT rows"
 
-echo "  Raw customers: $CUSTOMERS_RAW_COUNT"
+CUSTOMERS_PROC_COUNT=$(bq_count "stripe_processed.customers")
+echo "  stripe_processed.customers:          $CUSTOMERS_PROC_COUNT rows"
 
-echo "  Checking processed customers..."
-CUSTOMERS_PROC_COUNT=$(bq query --use_legacy_sql=false --format=csv \
-    "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.stripe_processed.customers\`" \
-    | tail -n 1 || echo "0")
-
-echo "  Processed customers: $CUSTOMERS_PROC_COUNT"
-
-echo "  Checking processed subscriptions..."
-SUBS_PROC_COUNT=$(bq query --use_legacy_sql=false --format=csv \
-    "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.stripe_processed.subscriptions\`" \
-    | tail -n 1 || echo "0")
-echo "  Processed subscriptions: $SUBS_PROC_COUNT"
-
-echo "  Checking AutoCare tiers..."
-TIERS_RAW_COUNT=$(bq query --use_legacy_sql=false --format=csv \
-    "SELECT COUNT(*) as count FROM \`${PROJECT_ID}.autocare_raw.tiers_raw\`" \
-    2>/dev/null | tail -n 1 || echo "0")
-echo "  AutoCare tiers_raw: $TIERS_RAW_COUNT"
+SUBS_PROC_COUNT=$(bq_count "stripe_processed.subscriptions")
+echo "  stripe_processed.subscriptions:      $SUBS_PROC_COUNT rows"
 
 if [ "$CUSTOMERS_PROC_COUNT" -gt 0 ] || [ "$SUBS_PROC_COUNT" -gt 0 ]; then
-    echo -e "${GREEN}  ✓ Data found in Stripe BigQuery tables${NC}"
+    echo -e "  ${GREEN}✓ Stripe data found${NC}"
 else
-    echo -e "${YELLOW}  ⚠ No data in Stripe processed tables yet${NC}"
-    echo "  This is normal if you have no Stripe data or first sync hasn't completed"
+    echo -e "  ${YELLOW}⚠ No Stripe data yet (normal if first sync hasn't run)${NC}"
 fi
-if [ "$TIERS_RAW_COUNT" -gt 0 ]; then
-    echo -e "${GREEN}  ✓ AutoCare data found (tiers_raw)${NC}"
+
+echo "  --- AutoCare ---"
+TIERS_RAW_COUNT=$(bq_count "autocare_raw.tiers_raw")
+echo "  autocare_raw.tiers_raw:              $TIERS_RAW_COUNT rows"
+
+MKTG_RAW_COUNT=$(bq_count "autocare_raw.marketing_data_raw")
+echo "  autocare_raw.marketing_data_raw:     $MKTG_RAW_COUNT rows"
+
+AC_CUSTOMERS_COUNT=$(bq_count "autocare_processed.marketing_customers")
+echo "  autocare_processed.marketing_customers: $AC_CUSTOMERS_COUNT rows"
+
+AC_SESSIONS_COUNT=$(bq_count "autocare_processed.marketing_sessions")
+echo "  autocare_processed.marketing_sessions:  $AC_SESSIONS_COUNT rows"
+
+AC_SUBS_COUNT=$(bq_count "autocare_processed.marketing_subscriptions")
+echo "  autocare_processed.marketing_subscriptions: $AC_SUBS_COUNT rows"
+
+if [ "$TIERS_RAW_COUNT" -gt 0 ] && [ "$AC_CUSTOMERS_COUNT" -gt 0 ]; then
+    echo -e "  ${GREEN}✓ AutoCare data found${NC}"
 else
-    echo -e "${YELLOW}  ⚠ No AutoCare data yet. Check credentials (AUTOCARE_API_EMAIL / autocare-api-email) and Cloud Function logs.${NC}"
+    echo -e "  ${YELLOW}⚠ No AutoCare data yet — check AUTOCARE_API_EMAIL / autocare-api-email secret and Cloud Function logs${NC}"
+fi
+
+echo "  --- Unified / BI ---"
+UNIFIED_COUNT=$(bq_count "unified.customers")
+echo "  unified.customers:                   $UNIFIED_COUNT rows"
+
+BI_COUNT=$(bq_count "bi.unified_customer_360_snapshot")
+echo "  bi.unified_customer_360_snapshot:    $BI_COUNT rows"
+
+if [ "$UNIFIED_COUNT" -gt 0 ]; then
+    echo -e "  ${GREEN}✓ unified.customers populated${NC}"
+else
+    echo -e "  ${YELLOW}⚠ unified.customers empty — will be populated after first successful sync${NC}"
+fi
+if [ "$BI_COUNT" -gt 0 ]; then
+    echo -e "  ${GREEN}✓ bi.unified_customer_360_snapshot populated${NC}"
+else
+    echo -e "  ${YELLOW}⚠ bi.unified_customer_360_snapshot empty — populated after unified.customers succeeds${NC}"
 fi
 
 echo ""

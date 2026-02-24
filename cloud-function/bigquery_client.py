@@ -554,38 +554,141 @@ class BigQueryClient:
 
     def refresh_unified_customers(self) -> Dict[str, Any]:
         """
-        Refresh unified.customers from stripe_processed.unified_customers view.
+        Refresh unified.customers by running a fully de-correlated JOIN query.
+        Does not rely on any view; avoids BigQuery's correlated subquery restriction.
         Run after all Stripe and AutoCare syncing is done.
         """
         unified_table = f"{self.project_id}.{self.unified_dataset}.customers"
-        view_ref = f"{self.project_id}.{self.processed_dataset}.unified_customers"
+        p = self.project_id
+        sp = self.processed_dataset            # stripe_processed
+        acp = self.autocare_processed_dataset  # autocare_processed
         try:
             # Ensure unified dataset exists
-            unified_dataset_id = f"{self.project_id}.{self.unified_dataset}"
+            unified_dataset_id = f"{p}.{self.unified_dataset}"
             try:
                 self.client.get_dataset(unified_dataset_id)
             except NotFound:
-                self.client.create_dataset(
-                    bigquery.Dataset(unified_dataset_id),
-                    exists_ok=True,
-                )
-            # Materialize view into unified.customers (view may live in stripe_processed)
+                self.client.create_dataset(bigquery.Dataset(unified_dataset_id), exists_ok=True)
+
+            # De-correlated query: pre-aggregate cars / sessions / AC subs into CTEs,
+            # then LEFT JOIN — BigQuery handles this without correlated-subquery errors.
             query = f"""
             CREATE OR REPLACE TABLE `{unified_table}` AS
-            SELECT * FROM `{view_ref}`
+            WITH
+              m AS (
+                SELECT
+                  billing_id, client_id,
+                  email          AS autocare_email,
+                  first_name     AS autocare_first_name,
+                  last_name      AS autocare_last_name,
+                  phone_number   AS autocare_phone,
+                  customer_created_date AS autocare_customer_created_date,
+                  updated_at     AS autocare_updated_at,
+                  ingested_at    AS autocare_ingested_at
+                FROM `{p}.{acp}.marketing_customers`
+              ),
+              stripe_subs AS (
+                SELECT
+                  customer_id,
+                  ARRAY_AGG(STRUCT(
+                    subscription_id, object_type AS sub_object_type, status AS sub_status,
+                    created AS sub_created, current_period_start, current_period_end,
+                    cancel_at_period_end, canceled_at, ended_at, currency AS sub_currency,
+                    amount AS sub_amount, subscription_interval, interval_count,
+                    plan_name, plan_id, product_id AS stripe_product_id, collection_method,
+                    updated_at AS sub_updated_at, ingested_at AS sub_ingested_at
+                  ) ORDER BY created DESC) AS stripe_subscriptions
+                FROM `{p}.{sp}.subscriptions`
+                GROUP BY customer_id
+              ),
+              ac_cars AS (
+                SELECT
+                  billing_id,
+                  ARRAY_AGG(STRUCT(
+                    car_id, client_id AS car_client_id, billing_id AS car_billing_id,
+                    json_data AS car_json_data, make, model, year, license_plate,
+                    color, vin, updated_at AS car_updated_at, ingested_at AS car_ingested_at
+                  ) ORDER BY car_id) AS cars
+                FROM `{p}.{acp}.marketing_cars`
+                GROUP BY billing_id
+              ),
+              ac_sessions AS (
+                SELECT
+                  client_id,
+                  ARRAY_AGG(STRUCT(
+                    session_id, client_id AS session_client_id, session_date,
+                    session_type, session_description, location_id, location_name,
+                    location_is_active, updated_at AS session_updated_at, ingested_at AS session_ingested_at
+                  ) ORDER BY session_date DESC) AS sessions
+                FROM `{p}.{acp}.marketing_sessions`
+                GROUP BY client_id
+              ),
+              ac_subs AS (
+                SELECT
+                  sub.billing_id,
+                  ARRAY_AGG(STRUCT(
+                    sub.subscription_id, sub.client_id AS sub_client_id,
+                    sub.billing_id AS sub_billing_id, sub.status AS sub_status,
+                    sub.product_id AS sub_product_id, sub.car_ids AS sub_car_ids,
+                    sub.updated_at AS sub_updated_at, sub.ingested_at AS sub_ingested_at,
+                    t.product_id AS tier_product_id, t.name AS tier_name,
+                    t.description AS tier_description, t.product_key AS tier_product_key,
+                    t.metadata_order AS tier_order, t.perks AS tier_perks,
+                    t.refund_required AS tier_refund_required,
+                    t.external_api_integration AS tier_external_api_integration,
+                    t.validation_rules AS tier_validation_rules,
+                    t.validation_description AS tier_validation_description,
+                    t.taxable_amount AS tier_taxable_amount,
+                    t.updated_at AS tier_updated_at, t.ingested_at AS tier_ingested_at
+                  ) ORDER BY sub.subscription_id) AS autocare_subscriptions_with_tiers
+                FROM `{p}.{acp}.marketing_subscriptions` sub
+                LEFT JOIN `{p}.{acp}.tiers` t ON t.product_id = sub.product_id
+                GROUP BY sub.billing_id
+              )
+            SELECT
+              c.customer_id,
+              c.object_type            AS stripe_object_type,
+              c.email                  AS stripe_email,
+              c.name                   AS stripe_name,
+              c.description            AS stripe_description,
+              c.phone                  AS stripe_phone,
+              c.created                AS stripe_created,
+              c.created_timestamp      AS stripe_created_timestamp,
+              c.address_line1, c.address_line2, c.address_city,
+              c.address_state, c.address_postal_code, c.address_country,
+              c.currency, c.balance, c.delinquent, c.default_source, c.invoice_prefix,
+              c.updated_at             AS stripe_updated_at,
+              c.ingested_at            AS stripe_ingested_at,
+              m.client_id              AS autocare_client_id,
+              m.autocare_email,
+              m.autocare_first_name,
+              m.autocare_last_name,
+              m.autocare_phone,
+              m.autocare_customer_created_date,
+              m.autocare_updated_at,
+              m.autocare_ingested_at,
+              COALESCE(c.email, m.autocare_email) AS email,
+              COALESCE(c.name, TRIM(CONCAT(
+                COALESCE(m.autocare_first_name, ''), ' ', COALESCE(m.autocare_last_name, '')
+              ))) AS name,
+              COALESCE(c.phone, m.autocare_phone) AS phone,
+              COALESCE(ss.stripe_subscriptions, [])               AS stripe_subscriptions,
+              COALESCE(cars.cars, [])                             AS cars,
+              COALESCE(sess.sessions, [])                         AS sessions,
+              COALESCE(asubs.autocare_subscriptions_with_tiers, []) AS autocare_subscriptions_with_tiers
+            FROM `{p}.{sp}.customers` c
+            LEFT JOIN m      ON m.billing_id      = c.customer_id
+            LEFT JOIN stripe_subs ss ON ss.customer_id = c.customer_id
+            LEFT JOIN ac_cars  cars  ON cars.billing_id  = c.customer_id
+            LEFT JOIN ac_sessions sess ON sess.client_id = m.client_id
+            LEFT JOIN ac_subs  asubs  ON asubs.billing_id = c.customer_id
             """
             self.client.query(query).result()
-            logger.info(f"Refreshed {unified_table} from {view_ref}")
+            logger.info(f"Refreshed {unified_table}")
             return {"status": "success", "table": unified_table}
         except Exception as e:
-            err_msg = str(e)
-            if "not found" in err_msg.lower() or "notFound" in err_msg:
-                err_msg = (
-                    f"{err_msg} — Create the view first: run sql/create_unified_customer_view.sql "
-                    "(replace PROJECT_ID with your project ID) in BigQuery."
-                )
             logger.error(f"Failed to refresh unified customers: {e}", exc_info=True)
-            return {"status": "failed", "error": err_msg, "table": unified_table}
+            return {"status": "failed", "error": str(e), "table": unified_table}
 
     def _load_bi_snapshot_sql(self) -> str:
         """Load BI snapshot SQL from file; substitute PROJECT_ID at runtime."""

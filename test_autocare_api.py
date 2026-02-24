@@ -10,7 +10,7 @@ DATA_URL = f"{BASE_URL}/v1/marketing/data"
 
 CREDENTIALS = {
     "email": "api_admin@test.com",
-    "password": "Test11234"
+    "password": "Test1234"
 }
 
 # --- EXECUTION ---
@@ -67,17 +67,28 @@ def main():
         print("Response:", data_resp.text[:500])
     else:
         marketing_data = data_resp.json()
-        data_list = marketing_data.get("data", []) if isinstance(marketing_data, dict) else marketing_data
-        max_show = 15
-        if len(data_list) > max_show:
-            truncated = {**marketing_data, "data": data_list[:max_show]}
-            print("Raw response (marketing data, first %d of %d):" % (max_show, len(data_list)))
-            print(json.dumps(truncated, indent=2))
-            print("... and %d more records." % (len(data_list) - max_show))
-        else:
-            print("Raw response (marketing data):")
-            print(json.dumps(marketing_data, indent=2))
-        analyze_marketing_data(marketing_data)
+        records = get_records(marketing_data)
+        emails = [r.get("email") for r in records if isinstance(r, dict)]
+        total = len(records)
+        print(f"Total record count: {total}")
+        print("\nCustomer emails:")
+        for i, email in enumerate(emails, 1):
+            print(f"  {i}. {email or '(empty)'}")
+
+def get_records(data):
+    """Return the data array from marketing API response."""
+    if isinstance(data, dict) and "data" in data:
+        return data["data"] if isinstance(data["data"], list) else []
+    if isinstance(data, list):
+        return data
+    return []
+
+def count_customers(data):
+    """
+    Return total number of customers from marketing API response.
+    Expects { "success", "count", "data": [ ... ] }; each item in data is a customer record.
+    """
+        return len(get_records(data))
 
 def analyze_tiers(data):
     """Summarize structure and content of tiers response."""
@@ -94,30 +105,6 @@ def analyze_tiers(data):
         for k, v in data.items():
             if isinstance(v, list):
                 print(f"  '{k}': list of {len(v)} item(s)")
-            else:
-                print(f"  '{k}': {type(v).__name__}")
-    else:
-        print(f"Type: {type(data).__name__}")
-
-def analyze_marketing_data(data):
-    """Summarize structure and content of marketing data response."""
-    print("\n--- Marketing data analysis ---")
-    if isinstance(data, list):
-        print(f"Type: list with {len(data)} item(s)")
-        for i, item in enumerate(data[:5]):  # first 5
-            if isinstance(item, dict):
-                print(f"  Item {i}: keys = {list(item.keys())}")
-            else:
-                print(f"  Item {i}: {type(item).__name__}")
-        if len(data) > 5:
-            print(f"  ... and {len(data) - 5} more")
-    elif isinstance(data, dict):
-        print(f"Type: dict with keys: {list(data.keys())}")
-        for k, v in data.items():
-            if isinstance(v, list):
-                print(f"  '{k}': list of {len(v)} item(s)")
-            elif isinstance(v, dict):
-                print(f"  '{k}': dict with keys {list(v.keys())[:8]}{'...' if len(v) > 8 else ''}")
             else:
                 print(f"  '{k}': {type(v).__name__}")
     else:
