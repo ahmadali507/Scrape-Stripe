@@ -3,7 +3,7 @@
 -- Replace PROJECT_ID with your GCP project ID before running.
 
 CREATE OR REPLACE TABLE `PROJECT_ID.bi.unified_customer_360_snapshot`
-PARTITION BY DATE(autocare_customer_since)
+PARTITION BY autocare_customer_since
 CLUSTER BY autocare_client_id, billing_id, current_tier_key
 OPTIONS(description = 'Flat customer 360 for BI tools - AutoCare is source of truth, Stripe verified - refreshed after sync')
 AS
