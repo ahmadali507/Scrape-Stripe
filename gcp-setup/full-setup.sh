@@ -4,10 +4,15 @@
 
 set -e
 
-# Optional: set these to pass to deploy (or store in Secret Manager via setup-secrets.sh for a more robust setup)
+# Replit webhook secret (required for new-customer GHL sync)
+# Set this before running: export REPLIT_WEBHOOK_SECRET=your-secret
 export REPLIT_WEBHOOK_SECRET="${REPLIT_WEBHOOK_SECRET:-xiomara-big-query-secret}"
-export AUTOCARE_API_EMAIL="${AUTOCARE_API_EMAIL:-api_admin@test.com}"
-export AUTOCARE_API_PASSWORD="${AUTOCARE_API_PASSWORD:-Test1234}"
+
+# AutoCare credentials: do NOT set defaults here.
+# Store them in Secret Manager instead (autocare-api-email / autocare-api-password).
+# If set as env vars they will be baked into the Cloud Function and override Secret Manager.
+# export AUTOCARE_API_EMAIL="..."
+# export AUTOCARE_API_PASSWORD="..."
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -102,6 +107,44 @@ else
     echo "  1. Replace PROJECT_ID in sql/create_unified_customer_view.sql with $PROJECT_ID"
     echo "  2. bq query --use_legacy_sql=false --project_id=$PROJECT_ID < sql/create_unified_customer_view.sql"
 fi
+echo ""
+
+# Step 3c: Pull latest secret values from Secret Manager → export as env vars
+# This guarantees deploy-function.sh always bakes the freshest credentials into
+# the Cloud Function config, regardless of what was set (or not set) in the shell.
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}STEP 3c: Loading latest secrets from Secret Manager${NC}"
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+PROJECT_ID=$(gcloud config get-value project)
+
+_load_secret() {
+    local SECRET_NAME="$1"
+    local ENV_VAR="$2"
+    local VALUE
+    VALUE=$(gcloud secrets versions access latest \
+        --secret="$SECRET_NAME" \
+        --project="$PROJECT_ID" 2>/dev/null || echo "")
+    if [ -n "$VALUE" ]; then
+        export "$ENV_VAR"="$VALUE"
+        echo -e "${GREEN}  ✓ $SECRET_NAME → \$$ENV_VAR${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ $SECRET_NAME not found or empty in Secret Manager — skipping \$$ENV_VAR${NC}"
+    fi
+}
+
+_load_secret "autocare-api-email"      AUTOCARE_API_EMAIL
+_load_secret "autocare-api-password"   AUTOCARE_API_PASSWORD
+_load_secret "replit-webhook-url"      REPLIT_WEBHOOK_URL
+_load_secret "replit-webhook-secret"   REPLIT_WEBHOOK_SECRET
+
+echo ""
+echo -e "${BLUE}  Resolved env vars for deployment:${NC}"
+[ -n "$AUTOCARE_API_EMAIL" ]    && echo "    AUTOCARE_API_EMAIL    = (set)" || echo "    AUTOCARE_API_EMAIL    = (not set — AutoCare sync will be skipped)"
+[ -n "$AUTOCARE_API_PASSWORD" ] && echo "    AUTOCARE_API_PASSWORD = (set)" || echo "    AUTOCARE_API_PASSWORD = (not set — AutoCare sync will be skipped)"
+[ -n "$REPLIT_WEBHOOK_URL" ]    && echo "    REPLIT_WEBHOOK_URL    = $REPLIT_WEBHOOK_URL" || echo "    REPLIT_WEBHOOK_URL    = (not set)"
+[ -n "$REPLIT_WEBHOOK_SECRET" ] && echo "    REPLIT_WEBHOOK_SECRET = (set)" || echo "    REPLIT_WEBHOOK_SECRET = (not set)"
 echo ""
 
 # Step 4: Deploy function
