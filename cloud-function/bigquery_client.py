@@ -240,56 +240,56 @@ class BigQueryClient:
             rows_to_insert = []
             
             for subscription in batch:
-            # Extract plan/price information
-            items = subscription.get('items', {}).get('data', [])
-            price_info = {}
-            if items:
-                price = items[0].get('price', {})
-                price_info = {
-                    'amount': price.get('unit_amount', 0) / 100 if price.get('unit_amount') else None,
-                    'currency': price.get('currency'),
-                    'interval': price.get('recurring', {}).get('interval'),
-                    'interval_count': price.get('recurring', {}).get('interval_count'),
-                    'plan_name': price.get('nickname') or price.get('product'),
-                    'plan_id': price.get('id'),
-                    'product_id': price.get('product')
+                # Extract plan/price information
+                items = subscription.get('items', {}).get('data', [])
+                price_info = {}
+                if items:
+                    price = items[0].get('price', {})
+                    price_info = {
+                        'amount': price.get('unit_amount', 0) / 100 if price.get('unit_amount') else None,
+                        'currency': price.get('currency'),
+                        'interval': price.get('recurring', {}).get('interval'),
+                        'interval_count': price.get('recurring', {}).get('interval_count'),
+                        'plan_name': price.get('nickname') or price.get('product'),
+                        'plan_id': price.get('id'),
+                        'product_id': price.get('product')
+                    }
+
+                row = {
+                    'subscription_id': subscription.get('id'),
+                    'object_type': subscription.get('object'),
+                    'status': subscription.get('status'),
+                    'created': datetime.fromtimestamp(subscription.get('created', 0)).isoformat(),
+                    'created_timestamp': subscription.get('created', 0),
+
+                    # Period
+                    'current_period_start': datetime.fromtimestamp(subscription.get('current_period_start', 0)).isoformat() if subscription.get('current_period_start') else None,
+                    'current_period_end': datetime.fromtimestamp(subscription.get('current_period_end', 0)).isoformat() if subscription.get('current_period_end') else None,
+                    'cancel_at_period_end': subscription.get('cancel_at_period_end'),
+                    'canceled_at': datetime.fromtimestamp(subscription.get('canceled_at', 0)).isoformat() if subscription.get('canceled_at') else None,
+                    'ended_at': datetime.fromtimestamp(subscription.get('ended_at', 0)).isoformat() if subscription.get('ended_at') else None,
+
+                    # Customer
+                    'customer_id': subscription.get('customer'),
+
+                    # Pricing
+                    'currency': price_info.get('currency') or subscription.get('currency'),
+                    'amount': price_info.get('amount'),
+                    'subscription_interval': price_info.get('interval'),
+                    'interval_count': price_info.get('interval_count'),
+
+                    # Plan
+                    'plan_name': price_info.get('plan_name'),
+                    'plan_id': price_info.get('plan_id'),
+                    'product_id': price_info.get('product_id'),
+
+                    # Collection
+                    'collection_method': subscription.get('collection_method'),
+
+                    # Tracking
+                    'updated_at': datetime.utcnow().isoformat(),
+                    'ingested_at': datetime.utcnow().isoformat()
                 }
-            
-            row = {
-                'subscription_id': subscription.get('id'),
-                'object_type': subscription.get('object'),
-                'status': subscription.get('status'),
-                'created': datetime.fromtimestamp(subscription.get('created', 0)).isoformat(),
-                'created_timestamp': subscription.get('created', 0),
-                
-                # Period
-                'current_period_start': datetime.fromtimestamp(subscription.get('current_period_start', 0)).isoformat() if subscription.get('current_period_start') else None,
-                'current_period_end': datetime.fromtimestamp(subscription.get('current_period_end', 0)).isoformat() if subscription.get('current_period_end') else None,
-                'cancel_at_period_end': subscription.get('cancel_at_period_end'),
-                'canceled_at': datetime.fromtimestamp(subscription.get('canceled_at', 0)).isoformat() if subscription.get('canceled_at') else None,
-                'ended_at': datetime.fromtimestamp(subscription.get('ended_at', 0)).isoformat() if subscription.get('ended_at') else None,
-                
-                # Customer
-                'customer_id': subscription.get('customer'),
-                
-                # Pricing
-                'currency': price_info.get('currency') or subscription.get('currency'),
-                'amount': price_info.get('amount'),
-                'subscription_interval': price_info.get('interval'),
-                'interval_count': price_info.get('interval_count'),
-                
-                # Plan
-                'plan_name': price_info.get('plan_name'),
-                'plan_id': price_info.get('plan_id'),
-                'product_id': price_info.get('product_id'),
-                
-                # Collection
-                'collection_method': subscription.get('collection_method'),
-                
-                # Tracking
-                'updated_at': datetime.utcnow().isoformat(),
-                'ingested_at': datetime.utcnow().isoformat()
-            }
                 rows_to_insert.append(row)
             
             errors = self.client.insert_rows_json(table_id, rows_to_insert)
@@ -754,6 +754,7 @@ class BigQueryClient:
         """
         Refresh bi.unified_customer_360_snapshot using full CTE query (latest subs, sessions, cars, counts).
         Run after unified.customers has been refreshed.
+        Drops the table first so partition/cluster spec changes are applied cleanly.
         """
         bi_table = f"{self.project_id}.{self.bi_dataset}.unified_customer_360_snapshot"
         try:
@@ -761,10 +762,15 @@ class BigQueryClient:
             try:
                 self.client.get_dataset(bi_dataset_id)
             except NotFound:
-                self.client.create_dataset(
-                    bigquery.Dataset(bi_dataset_id),
-                    exists_ok=True,
-                )
+                self.client.create_dataset(bigquery.Dataset(bi_dataset_id), exists_ok=True)
+
+            # Drop the table first — BigQuery refuses CREATE OR REPLACE TABLE when the
+            # partition or cluster spec changes (e.g. old spec used customer_since /
+            # customer_id, new spec uses autocare_customer_since / autocare_client_id).
+            self.client.query(
+                f"DROP TABLE IF EXISTS `{bi_table}`"
+            ).result()
+
             query = self._load_bi_snapshot_sql()
             self.client.query(query).result()
             logger.info(f"Refreshed {bi_table} (BI customer 360 snapshot)")
