@@ -6,7 +6,7 @@ Production API: https://memberships.autocarepr.com/api
 """
 import logging
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, Iterator, List, Any, Optional
 
 import requests
 
@@ -17,16 +17,19 @@ LOGIN_URL = f"{BASE_URL}/login"
 TIERS_URL = f"{BASE_URL}/v1/marketing/tiers"
 DATA_URL  = f"{BASE_URL}/v1/marketing/data"
 
-# Pagination / retry settings
+# Pagination / retry / pressure-relief settings
 _PAGE_SIZE   = 1000
 _MAX_RETRIES = 3
-_RETRY_SLEEP = 3  # seconds between retry attempts
+_RETRY_SLEEP = 3    # seconds between retry attempts on transient errors
+_PAGE_SLEEP  = 0.3  # seconds between consecutive page fetches to reduce server pressure
 
-# Transient errors that warrant a retry
+# Transient errors that warrant a retry.
+# SSLEOFError is caught as SSLError — server drops the TLS connection under load.
 _RETRYABLE = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
+    requests.exceptions.SSLError,
 )
 
 
@@ -80,6 +83,8 @@ class AutoCareClient:
     def _get_with_retry(self, url: str, params: Dict) -> Any:
         """
         GET a single page with up to _MAX_RETRIES attempts on transient errors.
+        Catches SSLError (including SSLEOFError) which the production server
+        raises under sustained load at high page numbers.
         Returns the parsed JSON body, or raises on unrecoverable failure.
         """
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -122,7 +127,7 @@ class AutoCareClient:
     def get_tiers(self) -> List[Dict[str, Any]]:
         """
         Fetch v1/marketing/tiers with full pagination.
-        Returns the combined list of tier objects across all pages.
+        Tiers are a small reference table; all pages are collected and returned.
         """
         all_tiers: List[Dict] = []
         page = 1
@@ -158,15 +163,29 @@ class AutoCareClient:
 
     def get_marketing_data(self) -> List[Dict[str, Any]]:
         """
-        Fetch v1/marketing/data with full pagination and per-page retry.
-
-        Uses includeOnlyServiceType=true to match the production data scope
-        used in manual tests. Iterates pages of _PAGE_SIZE until the API
-        returns a partial page, signalling the final page.
-
-        Returns the combined list of customer/session records.
+        Fetch ALL v1/marketing/data pages into memory.
+        Only use this for small datasets. For 700k+ records use
+        stream_marketing_data_pages() instead.
         """
         all_records: List[Dict] = []
+        for page_batch in self.stream_marketing_data_pages():
+            all_records.extend(page_batch)
+        return all_records
+
+    def stream_marketing_data_pages(self) -> Iterator[List[Dict[str, Any]]]:
+        """
+        Generator that yields one page of marketing data at a time.
+
+        Never accumulates the full dataset in RAM — peak memory is bounded
+        to _PAGE_SIZE records (~2–3 MB) regardless of total dataset size.
+
+        Includes _PAGE_SLEEP between fetches to reduce sustained load on
+        the AutoCare server and prevent SSL EOF connection drops.
+
+        Usage:
+            for page in client.stream_marketing_data_pages():
+                process(page)   # then let page be garbage-collected
+        """
         page = 1
 
         while True:
@@ -178,24 +197,17 @@ class AutoCareClient:
             logger.info("AutoCare marketing data: fetching page %d ...", page)
 
             body = self._get_with_retry(DATA_URL, params)
-            batch = self._extract_list(body, "get_marketing_data")
-
-            if batch is None:
-                logger.error(
-                    "AutoCare marketing data: page %d failed after %d attempts. Stopping.",
-                    page, _MAX_RETRIES,
-                )
-                break
+            batch = self._extract_list(body, "stream_marketing_data_pages")
 
             if not batch:
                 logger.info("AutoCare marketing data: page %d empty — done.", page)
                 break
 
-            all_records.extend(batch)
             logger.info(
-                "AutoCare marketing data: page %d → %d records (running total: %d)",
-                page, len(batch), len(all_records),
+                "AutoCare marketing data: page %d → %d records",
+                page, len(batch),
             )
+            yield batch
 
             if len(batch) < _PAGE_SIZE:
                 logger.info(
@@ -205,13 +217,4 @@ class AutoCareClient:
                 break
 
             page += 1
-
-        if len(all_records) == 0:
-            logger.warning(
-                "AutoCare marketing data: 0 records returned across all pages. "
-                "Check credentials and that the production API has data."
-            )
-        else:
-            logger.info("AutoCare marketing data: fetched %d total records", len(all_records))
-
-        return all_records
+            time.sleep(_PAGE_SLEEP)

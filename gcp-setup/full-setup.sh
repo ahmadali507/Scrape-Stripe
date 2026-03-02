@@ -169,12 +169,22 @@ fi
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
-# Step 4: Deploy function
+# Step 4: Deploy Stripe Cloud Function
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}STEP 4/8: Deploying Cloud Function${NC}"
+echo -e "${YELLOW}STEP 4/8: Deploying Stripe Cloud Function${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 ./deploy-function.sh
+echo ""
+
+# Step 4b: Deploy AutoCare Cloud Run Job
+# The job handles the 700k+ record AutoCare sync (~1.5h) and triggers
+# the Stripe Cloud Function on completion.
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}STEP 4b: Deploying AutoCare Cloud Run Job${NC}"
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+./deploy-job.sh
 echo ""
 
 # Step 5: Setup scheduler

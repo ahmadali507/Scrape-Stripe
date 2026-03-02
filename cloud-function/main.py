@@ -1,14 +1,23 @@
 """
 Stripe to BigQuery Cloud Function
 Entry point for HTTP triggered function that syncs Stripe + AutoCare data to BigQuery.
-Every run syncs both: AutoCare (tiers + marketing data) first, then Stripe (customers, subscriptions), then unified/BI tables.
+
+Default behaviour (no body / entities not specified):
+  - AutoCare sync (tiers + marketing data) — skipped when skip_autocare=true
+  - Stripe incremental sync (customers, subscriptions)
+  - unified.customers refresh
+  - bi.unified_customer_360_snapshot refresh
+
+When called by the AutoCare Cloud Run Job after it finishes, it passes
+{"skip_autocare": true} so the function only handles Stripe + unified/BI.
 """
+import json
 import os
 import functions_framework
 from flask import Request
 import logging
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, List, Tuple, Any
 
 from stripe_client import StripeClient
 from bigquery_client import BigQueryClient
@@ -41,9 +50,10 @@ def sync_handler(request: Request) -> tuple[str, int]:
         logger.info(f"Triggered at: {datetime.utcnow().isoformat()}")
         logger.info("=" * 60)
         
-        # Parse request parameters (optional entity filter only; AutoCare always runs)
+        # Parse request parameters
         request_json = request.get_json(silent=True) or {}
         entities = request_json.get('entities')
+        skip_autocare = request_json.get('skip_autocare', False)
 
         if entities is not None:
             if isinstance(entities, str):
@@ -53,6 +63,9 @@ def sync_handler(request: Request) -> tuple[str, int]:
             entities = ['customers', 'subscriptions']
             logger.info(f"Syncing Stripe entities: {entities}")
 
+        if skip_autocare:
+            logger.info("skip_autocare=true — AutoCare sync handled by Cloud Run Job, skipping here")
+
         # Initialize clients
         stripe_client = StripeClient()
         bq_client = BigQueryClient()
@@ -61,17 +74,20 @@ def sync_handler(request: Request) -> tuple[str, int]:
         results = {}
         overall_success = True
 
-        # Always sync AutoCare first (tiers + marketing data → autocare_* datasets)
-        try:
-            logger.info("\n--- Syncing AutoCare (tiers + marketing data) ---")
-            ac_result = sync_autocare_to_bigquery(bq_client)
-            results['autocare'] = ac_result
-            if ac_result.get('status') != 'success':
+        # Sync AutoCare unless explicitly skipped (Cloud Run Job handles it separately)
+        if not skip_autocare:
+            try:
+                logger.info("\n--- Syncing AutoCare (tiers + marketing data) ---")
+                ac_result = sync_autocare_to_bigquery(bq_client)
+                results['autocare'] = ac_result
+                if ac_result.get('status') not in ('success', 'partial'):
+                    overall_success = False
+            except Exception as e:
+                logger.error(f"AutoCare sync failed: {e}", exc_info=True)
+                results['autocare'] = {'status': 'failed', 'error': str(e), 'records_synced': 0}
                 overall_success = False
-        except Exception as e:
-            logger.error(f"AutoCare sync failed: {e}", exc_info=True)
-            results['autocare'] = {'status': 'failed', 'error': str(e), 'records_synced': 0}
-            overall_success = False
+        else:
+            results['autocare'] = {'status': 'skipped', 'message': 'handled by Cloud Run Job'}
 
         # Sync each Stripe entity type
         for entity_type in entities:
@@ -170,48 +186,199 @@ def _get_autocare_credentials() -> tuple:
         return email or None, password or None
 
 
+def parse_marketing_page(
+    data: List[Dict],
+) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
+    """
+    Parse one page of AutoCare marketing API records into four entity lists:
+    (customers, subscriptions, sessions, cars).
+
+    Deduplicates customers within the page by (client_id, billing_id).
+    Cross-page duplicates are handled by the BigQuery MERGE at job end.
+    """
+    customers:     List[Dict] = []
+    subscriptions: List[Dict] = []
+    sessions:      List[Dict] = []
+    cars:          List[Dict] = []
+    seen_customers: set = set()
+    now = datetime.utcnow().isoformat()
+
+    for item in data:
+        # Sessions
+        if item.get("sessionId"):
+            loc = item.get("location") or {}
+            sessions.append({
+                "session_id":          item.get("sessionId"),
+                "client_id":           item.get("clientId") or "",
+                "session_date":        item.get("sessionDate"),
+                "session_type":        item.get("sessionType"),
+                "session_description": item.get("sessionDescription"),
+                "location_id":         loc.get("id"),
+                "location_name":       loc.get("name"),
+                "location_is_active":  loc.get("isActive"),
+                "updated_at":          now,
+                "ingested_at":         now,
+            })
+
+        # Customers + subscriptions + cars
+        if item.get("clientId") or item.get("billingID") or item.get("email"):
+            key = (item.get("clientId") or "", item.get("billingID") or "")
+            if key not in seen_customers:
+                seen_customers.add(key)
+                customers.append({
+                    "client_id":             item.get("clientId") or "",
+                    "billing_id":            item.get("billingID"),
+                    "email":                 item.get("email"),
+                    "first_name":            item.get("firstName"),
+                    "last_name":             item.get("lastName"),
+                    "phone_number":          item.get("phoneNumber"),
+                    "customer_created_date": item.get("customerCreatedDate"),
+                    "updated_at":            now,
+                    "ingested_at":           now,
+                })
+
+            for sub in item.get("subscriptions") or []:
+                subscriptions.append({
+                    "subscription_id": sub.get("id"),
+                    "client_id":       item.get("clientId") or "",
+                    "billing_id":      item.get("billingID"),
+                    "status":          sub.get("status"),
+                    "product_id":      sub.get("productId"),
+                    "car_ids":         json.dumps(sub.get("carIds") or []),
+                    "updated_at":      now,
+                    "ingested_at":     now,
+                })
+
+            for car in item.get("cars") or []:
+                if not isinstance(car, dict):
+                    continue
+                car_id = car.get("id") or car.get("_id") or ""
+                if not car_id:
+                    continue
+                cars.append({
+                    "car_id":        car_id,
+                    "client_id":     item.get("clientId") or "",
+                    "billing_id":    item.get("billingID"),
+                    "json_data":     json.dumps(car),
+                    "make":          car.get("make"),
+                    "model":         car.get("model"),
+                    "year":          car.get("year"),
+                    "license_plate": car.get("licensePlate") or car.get("license_plate"),
+                    "color":         car.get("color"),
+                    "vin":           car.get("vin"),
+                    "updated_at":    now,
+                    "ingested_at":   now,
+                })
+
+    return customers, subscriptions, sessions, cars
+
+
 def sync_autocare_to_bigquery(bq_client: BigQueryClient) -> Dict[str, Any]:
     """
-    Fetch AutoCare tiers + marketing data, write raw and processed to BigQuery.
-    Credentials from env (AUTOCARE_API_EMAIL, AUTOCARE_API_PASSWORD) or Secret Manager
-    (autocare-api-email, autocare-api-password).
+    Stream AutoCare tiers + marketing data page-by-page into BigQuery.
+
+    Architecture:
+      1. Tiers   → TRUNCATE + full reload (small reference table, fast)
+      2. Marketing data (700k+ records):
+         a. prepare_autocare_staging() — TRUNCATE staging tables once
+         b. For each page (~1 000 records):
+              - Append raw records to autocare_raw.marketing_data_raw
+              - Parse into 4 entity types
+              - INSERT parsed rows into staging tables
+         c. merge_autocare_staging_to_processed() — one MERGE per entity
+            at the end (dedup + upsert into processed tables)
+
+    Memory: bounded to O(1 page) ≈ 2–3 MB regardless of dataset size.
     """
     if AutoCareClient is None:
         return {"status": "failed", "error": "autocare_client not available", "records_synced": 0}
+
     email, password = _get_autocare_credentials()
     if not email or not password:
         return {
             "status": "failed",
-            "error": "AUTOCARE_API_EMAIL and AUTOCARE_API_PASSWORD not set (set env vars or store in Secret Manager: autocare-api-email, autocare-api-password)",
+            "error": (
+                "AUTOCARE_API_EMAIL and AUTOCARE_API_PASSWORD not set "
+                "(set env vars or store in Secret Manager: "
+                "autocare-api-email, autocare-api-password)"
+            ),
             "records_synced": 0,
         }
+
     sync_started_at = datetime.utcnow()
+
     try:
         ac = AutoCareClient(email=email, password=password)
+
+        # ── 1. Tiers (small, full reload) ────────────────────────────
         tiers = ac.get_tiers()
-        data = ac.get_marketing_data()
-        if len(tiers) == 0 and len(data) == 0:
-            logger.warning(
-                "AutoCare API returned 0 tiers and 0 marketing records. "
-                "Check credentials (AUTOCARE_API_EMAIL / autocare-api-email) and that the API has data."
-            )
-        else:
-            logger.info(f"AutoCare API returned {len(tiers)} tiers, {len(data)} marketing records")
         bq_client.insert_autocare_raw_tiers(tiers)
         bq_client.upsert_autocare_processed_tiers(tiers)
         bq_client.update_autocare_sync_metadata(
             "autocare_tiers", len(tiers), sync_started_at, datetime.utcnow(), "success"
         )
-        bq_client.insert_autocare_raw_marketing_data(data)
-        bq_client.upsert_autocare_processed_marketing_data(data)
-        bq_client.update_autocare_sync_metadata(
-            "autocare_marketing_data", len(data), sync_started_at, datetime.utcnow(), "success"
+        logger.info(f"Tiers synced: {len(tiers)} records")
+
+        # ── 2. Marketing data (streaming) ────────────────────────────
+        bq_client.prepare_autocare_staging()
+
+        total_records = 0
+        total_pages   = 0
+        failed_pages:  List[int] = []
+
+        for page_num, page_data in enumerate(ac.stream_marketing_data_pages(), start=1):
+            try:
+                # Raw audit log — append all records from this page
+                bq_client.insert_autocare_raw_marketing_page(page_data)
+
+                # Parse page into entity types and write to staging
+                customers, subscriptions, sessions, cars = parse_marketing_page(page_data)
+                bq_client.insert_autocare_staging_batch(customers, subscriptions, sessions, cars)
+
+                total_records += len(page_data)
+                total_pages    = page_num
+
+                if page_num % 50 == 0:
+                    logger.info(
+                        "Progress: page %d — %d records so far", page_num, total_records
+                    )
+
+            except Exception as page_err:
+                logger.error("Page %d failed (skipping): %s", page_num, page_err, exc_info=True)
+                failed_pages.append(page_num)
+                continue
+
+        logger.info(
+            "Streaming complete: %d pages, %d records, %d failed pages",
+            total_pages, total_records, len(failed_pages),
         )
-        return {"status": "success", "records_synced": len(tiers) + len(data), "tiers": len(tiers), "marketing_data": len(data)}
+
+        # ── 3. MERGE staging → processed (one pass per entity) ───────
+        bq_client.merge_autocare_staging_to_processed()
+
+        status = "success" if not failed_pages else "partial"
+        bq_client.update_autocare_sync_metadata(
+            "autocare_marketing_data",
+            total_records,
+            sync_started_at,
+            datetime.utcnow(),
+            status,
+            error_message=f"Failed pages: {failed_pages}" if failed_pages else None,
+        )
+
+        return {
+            "status":        status,
+            "records_synced": total_records,
+            "tiers":          len(tiers),
+            "pages":          total_pages,
+            "failed_pages":   failed_pages,
+        }
+
     except Exception as e:
         logger.exception("AutoCare sync failed")
         bq_client.update_autocare_sync_metadata(
-            "autocare_marketing_data", 0, sync_started_at, datetime.utcnow(), "failed", error_message=str(e)
+            "autocare_marketing_data", 0, sync_started_at, datetime.utcnow(), "failed",
+            error_message=str(e),
         )
         return {"status": "failed", "error": str(e), "records_synced": 0}
 

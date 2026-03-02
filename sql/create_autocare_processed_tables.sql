@@ -91,3 +91,63 @@ CLUSTER BY car_id, billing_id, client_id
 OPTIONS(
   description="Processed AutoCare cars from v1/marketing/data - full payload in json_data"
 );
+
+-- ── Staging tables ────────────────────────────────────────────────────────────
+-- Temporary accumulators used by the Cloud Run Job streaming sync.
+-- Flow: TRUNCATE once → INSERT per page → MERGE into processed → TRUNCATE cleanup.
+-- Same schemas as processed tables; no PARTITION/CLUSTER (temporary use only).
+
+CREATE TABLE IF NOT EXISTS autocare_processed.staging_customers (
+  client_id STRING NOT NULL,
+  billing_id STRING,
+  email STRING,
+  first_name STRING,
+  last_name STRING,
+  phone_number STRING,
+  customer_created_date TIMESTAMP,
+  updated_at TIMESTAMP,
+  ingested_at TIMESTAMP
+)
+OPTIONS(description="Staging accumulator for marketing_customers — truncated each sync run");
+
+CREATE TABLE IF NOT EXISTS autocare_processed.staging_subscriptions (
+  subscription_id STRING NOT NULL,
+  client_id STRING,
+  billing_id STRING,
+  status STRING,
+  product_id STRING,
+  car_ids STRING,
+  updated_at TIMESTAMP,
+  ingested_at TIMESTAMP
+)
+OPTIONS(description="Staging accumulator for marketing_subscriptions — truncated each sync run");
+
+CREATE TABLE IF NOT EXISTS autocare_processed.staging_sessions (
+  session_id STRING NOT NULL,
+  client_id STRING,
+  session_date TIMESTAMP,
+  session_type STRING,
+  session_description STRING,
+  location_id STRING,
+  location_name STRING,
+  location_is_active BOOLEAN,
+  updated_at TIMESTAMP,
+  ingested_at TIMESTAMP
+)
+OPTIONS(description="Staging accumulator for marketing_sessions — truncated each sync run");
+
+CREATE TABLE IF NOT EXISTS autocare_processed.staging_cars (
+  car_id STRING NOT NULL,
+  client_id STRING,
+  billing_id STRING,
+  json_data STRING,
+  make STRING,
+  model STRING,
+  year INT64,
+  license_plate STRING,
+  color STRING,
+  vin STRING,
+  updated_at TIMESTAMP,
+  ingested_at TIMESTAMP
+)
+OPTIONS(description="Staging accumulator for marketing_cars — truncated each sync run");
