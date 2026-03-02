@@ -28,6 +28,69 @@ FUNCTION_NAME="stripe-bigquery-sync"
 REGION="us-central1"
 JOB_NAME="stripe-bigquery-daily-sync"
 
+# ── Test 0: Verify Secret Manager credentials ─────────────────────────────────
+echo -e "${BLUE}Test 0: Verifying credentials in Secret Manager...${NC}"
+echo ""
+
+_mask() {
+    local V="$1"
+    if [ ${#V} -le 4 ]; then echo "****"; else echo "${V:0:4}****"; fi
+}
+
+_check_secret() {
+    local SECRET_NAME="$1"
+    local SHOW_FULL="${2:-false}"
+    local VALUE
+    VALUE=$(gcloud secrets versions access latest \
+        --secret="$SECRET_NAME" \
+        --project="$PROJECT_ID" 2>/dev/null || echo "")
+    if [ -n "$VALUE" ]; then
+        if [ "$SHOW_FULL" = "true" ]; then
+            echo -e "  ${GREEN}✓${NC} $SECRET_NAME = $VALUE"
+        else
+            echo -e "  ${GREEN}✓${NC} $SECRET_NAME = $(_mask "$VALUE") (masked)"
+        fi
+        echo "$VALUE"   # return value for capture
+    else
+        echo -e "  ${RED}✗${NC} $SECRET_NAME = (NOT FOUND or empty)"
+        echo ""
+    fi
+}
+
+echo -e "  ${BLUE}--- AutoCare ---${NC}"
+AUTOCARE_EMAIL=$(_check_secret "autocare-api-email"    true  2>/dev/null | tail -n 1)
+AUTOCARE_PASS=$( _check_secret "autocare-api-password" false 2>/dev/null | tail -n 1)
+
+echo -e "  ${BLUE}--- Stripe ---${NC}"
+_check_secret "stripe-api-key" false > /dev/null
+
+echo -e "  ${BLUE}--- Replit / GoHighLevel ---${NC}"
+_check_secret "replit-webhook-url"    true  > /dev/null
+_check_secret "replit-webhook-secret" false > /dev/null
+
+echo ""
+echo -e "${BLUE}  Cloud Function baked-in env vars (what it will actually use):${NC}"
+FUNC_ENV=$(gcloud functions describe "$FUNCTION_NAME" \
+    --region="$REGION" \
+    --gen2 \
+    --format='value(serviceConfig.environmentVariables)' 2>/dev/null || echo "")
+if [ -n "$FUNC_ENV" ]; then
+    # Print each var on its own line, masking passwords/secrets
+    echo "$FUNC_ENV" | tr ',' '\n' | while IFS='=' read -r KEY VAL; do
+        case "$KEY" in
+            *PASSWORD*|*SECRET*|*KEY*)
+                echo -e "    $KEY = $(_mask "$VAL") (masked)" ;;
+            *)
+                echo -e "    $KEY = $VAL" ;;
+        esac
+    done
+else
+    echo "    (no env vars set on function)"
+fi
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
 # Test 1: Verify BigQuery datasets and tables
 echo -e "${BLUE}Test 1: Verifying BigQuery structure...${NC}"
 

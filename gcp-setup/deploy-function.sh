@@ -6,6 +6,7 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo "=========================================="
@@ -21,6 +22,54 @@ if [ -z "$PROJECT_ID" ]; then
 fi
 
 echo -e "${YELLOW}Project: $PROJECT_ID${NC}"
+echo ""
+
+# ── Load latest secrets from Secret Manager ──────────────────────────────────
+# Always pulls the newest version of every secret so the deployed function
+# is guaranteed to use current credentials, not stale env vars.
+echo -e "${YELLOW}Loading latest secrets from Secret Manager...${NC}"
+
+_load_secret() {
+    local SECRET_NAME="$1"
+    local ENV_VAR="$2"
+    local VALUE
+    VALUE=$(gcloud secrets versions access latest \
+        --secret="$SECRET_NAME" \
+        --project="$PROJECT_ID" 2>/dev/null || echo "")
+    if [ -n "$VALUE" ]; then
+        export "$ENV_VAR"="$VALUE"
+        echo -e "${GREEN}  ✓ $SECRET_NAME loaded into \$$ENV_VAR${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ $SECRET_NAME not found or empty — \$$ENV_VAR will not be set${NC}"
+    fi
+}
+
+_mask() {
+    # Show first 4 chars + *** for verification without fully exposing the value
+    local V="$1"
+    if [ ${#V} -le 4 ]; then echo "****"; else echo "${V:0:4}****"; fi
+}
+
+_load_secret "autocare-api-email"    AUTOCARE_API_EMAIL
+_load_secret "autocare-api-password" AUTOCARE_API_PASSWORD
+_load_secret "replit-webhook-url"    REPLIT_WEBHOOK_URL
+_load_secret "replit-webhook-secret" REPLIT_WEBHOOK_SECRET
+
+echo ""
+echo -e "${BLUE}━━━━ Credentials resolved for this deployment ━━━━━━━━━━━━━━━━${NC}"
+echo -e "  AUTOCARE_API_EMAIL    = ${AUTOCARE_API_EMAIL:-(NOT SET — AutoCare sync will fail)}"
+if [ -n "$AUTOCARE_API_PASSWORD" ]; then
+    echo -e "  AUTOCARE_API_PASSWORD = $(_mask "$AUTOCARE_API_PASSWORD") (masked)"
+else
+    echo -e "  AUTOCARE_API_PASSWORD = ${RED}(NOT SET — AutoCare sync will fail)${NC}"
+fi
+echo -e "  REPLIT_WEBHOOK_URL    = ${REPLIT_WEBHOOK_URL:-(not set)}"
+if [ -n "$REPLIT_WEBHOOK_SECRET" ]; then
+    echo -e "  REPLIT_WEBHOOK_SECRET = $(_mask "$REPLIT_WEBHOOK_SECRET") (masked)"
+else
+    echo -e "  REPLIT_WEBHOOK_SECRET = (not set)"
+fi
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
 # Configuration

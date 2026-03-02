@@ -139,12 +139,34 @@ _load_secret "autocare-api-password"   AUTOCARE_API_PASSWORD
 _load_secret "replit-webhook-url"      REPLIT_WEBHOOK_URL
 _load_secret "replit-webhook-secret"   REPLIT_WEBHOOK_SECRET
 
+_mask() {
+    local V="$1"
+    if [ ${#V} -le 4 ]; then echo "****"; else echo "${V:0:4}****"; fi
+}
+
 echo ""
-echo -e "${BLUE}  Resolved env vars for deployment:${NC}"
-[ -n "$AUTOCARE_API_EMAIL" ]    && echo "    AUTOCARE_API_EMAIL    = (set)" || echo "    AUTOCARE_API_EMAIL    = (not set — AutoCare sync will be skipped)"
-[ -n "$AUTOCARE_API_PASSWORD" ] && echo "    AUTOCARE_API_PASSWORD = (set)" || echo "    AUTOCARE_API_PASSWORD = (not set — AutoCare sync will be skipped)"
-[ -n "$REPLIT_WEBHOOK_URL" ]    && echo "    REPLIT_WEBHOOK_URL    = $REPLIT_WEBHOOK_URL" || echo "    REPLIT_WEBHOOK_URL    = (not set)"
-[ -n "$REPLIT_WEBHOOK_SECRET" ] && echo "    REPLIT_WEBHOOK_SECRET = (set)" || echo "    REPLIT_WEBHOOK_SECRET = (not set)"
+echo -e "${BLUE}━━━━ Secrets loaded — will be baked into Cloud Function ━━━━━━${NC}"
+if [ -n "$AUTOCARE_API_EMAIL" ]; then
+    echo -e "  ${GREEN}✓${NC} AUTOCARE_API_EMAIL    = $AUTOCARE_API_EMAIL"
+else
+    echo -e "  ${RED}✗${NC} AUTOCARE_API_EMAIL    = (NOT SET — AutoCare sync will fail)"
+fi
+if [ -n "$AUTOCARE_API_PASSWORD" ]; then
+    echo -e "  ${GREEN}✓${NC} AUTOCARE_API_PASSWORD = $(_mask "$AUTOCARE_API_PASSWORD") (masked)"
+else
+    echo -e "  ${RED}✗${NC} AUTOCARE_API_PASSWORD = (NOT SET — AutoCare sync will fail)"
+fi
+if [ -n "$REPLIT_WEBHOOK_URL" ]; then
+    echo -e "  ${GREEN}✓${NC} REPLIT_WEBHOOK_URL    = $REPLIT_WEBHOOK_URL"
+else
+    echo -e "  ${YELLOW}⚠${NC} REPLIT_WEBHOOK_URL    = (not set)"
+fi
+if [ -n "$REPLIT_WEBHOOK_SECRET" ]; then
+    echo -e "  ${GREEN}✓${NC} REPLIT_WEBHOOK_SECRET = $(_mask "$REPLIT_WEBHOOK_SECRET") (masked)"
+else
+    echo -e "  ${YELLOW}⚠${NC} REPLIT_WEBHOOK_SECRET = (not set)"
+fi
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
 # Step 4: Deploy function

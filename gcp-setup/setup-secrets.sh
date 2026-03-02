@@ -180,3 +180,44 @@ echo "  echo -n 'your-value' | gcloud secrets versions add replit-webhook-url --
 echo "  echo -n 'your-value' | gcloud secrets versions add autocare-api-email --data-file=-"
 echo ""
 
+# ── Verification: read back every secret and print current values ─────────────
+BLUE='\033[0;34m'
+echo -e "${BLUE}━━━━ Current Secret Manager values (verification) ━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}  Project: $PROJECT_ID${NC}"
+echo ""
+
+_mask() {
+    local V="$1"
+    if [ ${#V} -le 4 ]; then echo "****"; else echo "${V:0:4}****"; fi
+}
+
+_verify_secret() {
+    local SECRET_NAME="$1"
+    local SHOW_FULL="${2:-false}"   # pass "true" to print value in full (e.g. email/url)
+    local VALUE
+    VALUE=$(gcloud secrets versions access latest \
+        --secret="$SECRET_NAME" \
+        --project="$PROJECT_ID" 2>/dev/null || echo "")
+    if [ -n "$VALUE" ]; then
+        if [ "$SHOW_FULL" = "true" ]; then
+            echo -e "  ${GREEN}✓${NC} $SECRET_NAME = $VALUE"
+        else
+            echo -e "  ${GREEN}✓${NC} $SECRET_NAME = $(_mask "$VALUE") (masked)"
+        fi
+    else
+        echo -e "  ${RED}✗${NC} $SECRET_NAME = (NOT FOUND or empty)"
+    fi
+}
+
+_verify_secret "stripe-api-key"          false
+_verify_secret "autocare-api-email"      true
+_verify_secret "autocare-api-password"   false
+_verify_secret "replit-webhook-url"      true
+_verify_secret "replit-webhook-secret"   false
+
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "  If any value above is wrong, update it with:"
+echo "  echo -n 'correct-value' | gcloud secrets versions add <secret-name> --data-file=-"
+echo ""
+
