@@ -83,8 +83,14 @@ class AutoCareClient:
     def _get_with_retry(self, url: str, params: Dict) -> Any:
         """
         GET a single page with up to _MAX_RETRIES attempts on transient errors.
-        Catches SSLError (including SSLEOFError) which the production server
-        raises under sustained load at high page numbers.
+
+        Handles two distinct failure modes:
+        - Transient network errors (SSL EOF, connection drop, timeout): retry with
+          the same token after a short sleep.
+        - 401 Unauthorized: the JWT has expired mid-job (common after ~1h of
+          continuous fetching). Clear the cached token so _get_token() re-logs in,
+          then retry immediately without sleeping.
+
         Returns the parsed JSON body, or raises on unrecoverable failure.
         """
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -95,8 +101,25 @@ class AutoCareClient:
                     params=params,
                     timeout=60,
                 )
+
+                # JWT expired mid-job — re-authenticate and retry immediately.
+                if resp.status_code == 401:
+                    logger.warning(
+                        "AutoCare 401 on attempt %d/%d (JWT likely expired) — "
+                        "clearing token and re-authenticating ...",
+                        attempt, _MAX_RETRIES,
+                    )
+                    self._token = None  # force _get_token() to login again
+                    if attempt == _MAX_RETRIES:
+                        raise RuntimeError(
+                            f"AutoCare returned 401 after {_MAX_RETRIES} re-auth "
+                            f"attempts for {url}?{params}"
+                        )
+                    continue  # no sleep — just re-login and retry
+
                 resp.raise_for_status()
                 return resp.json()
+
             except _RETRYABLE as exc:
                 if attempt == _MAX_RETRIES:
                     raise
