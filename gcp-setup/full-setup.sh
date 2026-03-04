@@ -177,14 +177,13 @@ echo ""
 ./deploy-function.sh
 echo ""
 
-# Step 4b: Deploy AutoCare Cloud Run Job
-# The job handles the 700k+ record AutoCare sync (~1.5h) and triggers
-# the Stripe Cloud Function on completion.
+# Step 4b: Cleanup redundant AutoCare Cloud Run Job and scheduler (if present)
+# AutoCare now runs inside the Cloud Function via stripe-customers endpoint.
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}STEP 4b: Deploying AutoCare Cloud Run Job${NC}"
+echo -e "${YELLOW}STEP 4b: Cleanup redundant job and scheduler${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-./deploy-job.sh
+./cleanup-job-and-scheduler.sh
 echo ""
 
 # Step 5: Setup scheduler
@@ -213,7 +212,7 @@ echo -e "${GREEN}Your Stripe to BigQuery pipeline is now running!${NC}"
 echo ""
 echo -e "${BLUE}What's happening now:${NC}"
 echo "  ✅ Cloud Function deployed and tested"
-echo "  ✅ Daily sync scheduled for 6:00 AM UTC"
+echo "  ✅ Daily sync scheduled for 4:00 AM UTC"
 echo "  ✅ BigQuery tables ready for queries"
 echo "  ✅ Stripe data syncing automatically"
 echo ""

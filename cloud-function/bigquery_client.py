@@ -393,6 +393,27 @@ class BigQueryClient:
                 raise Exception(f"Failed to insert AutoCare raw marketing data: {errors}")
         logger.info(f"Inserted {len(rows)} rows into {table_id}")
 
+    def insert_autocare_raw_stripe_customers(self, data: List[Dict]) -> None:
+        """Append raw stripe-customers API response to autocare_raw.stripe_customers_raw (append-only)."""
+        if not data:
+            logger.info("No AutoCare stripe-customers data to insert")
+            return
+        table_id = f"{self.project_id}.{self.autocare_raw_dataset}.stripe_customers_raw"
+        now = datetime.utcnow().isoformat()
+        rows = [
+            {
+                "id": item.get("clientId") or item.get("billingID") or f"row_{i}",
+                "json_data": json.dumps(item),
+                "ingested_at": now,
+            }
+            for i, item in enumerate(data)
+        ]
+        for i in range(0, len(rows), 500):
+            errors = self.client.insert_rows_json(table_id, rows[i : i + 500])
+            if errors:
+                raise Exception(f"Failed to insert AutoCare raw stripe_customers: {errors}")
+        logger.info(f"Inserted {len(rows)} rows into {table_id}")
+
     def upsert_autocare_processed_tiers(self, tiers: List[Dict]) -> None:
         """Replace autocare_processed.tiers with flattened tier data."""
         if not tiers:
@@ -523,6 +544,38 @@ class BigQueryClient:
                     raise Exception(f"Failed to insert {table_name}: {errors}")
             logger.info(f"Upserted {len(rows)} rows into {table_id}")
 
+    def replace_autocare_processed_from_stripe_customers(
+        self,
+        customers: List[Dict],
+        subscriptions: List[Dict],
+        sessions: List[Dict],
+        cars: List[Dict],
+    ) -> None:
+        """
+        Full refresh: TRUNCATE the four processed tables and INSERT the given rows.
+        Used after fetching stripe-customers (no staging tables).
+        """
+        p = self.project_id
+        ds = self.autocare_processed_dataset
+        for table_name, rows in [
+            ("marketing_customers", customers),
+            ("marketing_subscriptions", subscriptions),
+            ("marketing_sessions", sessions),
+            ("marketing_cars", cars),
+        ]:
+            table_id = f"{p}.{ds}.{table_name}"
+            try:
+                self.client.query(f"TRUNCATE TABLE `{table_id}`").result()
+            except Exception as e:
+                logger.warning(f"TRUNCATE {table_name}: {e}")
+            if not rows:
+                continue
+            for i in range(0, len(rows), 500):
+                errors = self.client.insert_rows_json(table_id, rows[i : i + 500])
+                if errors:
+                    raise Exception(f"Failed to insert {table_name}: {errors}")
+            logger.info(f"Inserted {len(rows)} rows into {table_id}")
+
     def update_autocare_sync_metadata(
         self,
         entity_type: str,
@@ -551,219 +604,6 @@ class BigQueryClient:
             logger.error(f"Errors updating AutoCare sync metadata: {errors}")
         else:
             logger.info(f"Updated AutoCare sync metadata for {entity_type}")
-
-    # ------------------------------------------------------------------
-    # AutoCare streaming / staging / MERGE  (used by Cloud Run Job)
-    # ------------------------------------------------------------------
-
-    def prepare_autocare_staging(self) -> None:
-        """
-        TRUNCATE all 4 staging tables at the start of each sync run.
-        Called once before streaming begins so the staging tables are clean.
-        """
-        p   = self.project_id
-        ds  = self.autocare_processed_dataset
-        for tbl in [
-            "staging_customers",
-            "staging_subscriptions",
-            "staging_sessions",
-            "staging_cars",
-        ]:
-            try:
-                self.client.query(f"TRUNCATE TABLE `{p}.{ds}.{tbl}`").result()
-                logger.info("Truncated %s.%s", ds, tbl)
-            except Exception as exc:
-                logger.warning("Could not truncate %s (may not exist yet): %s", tbl, exc)
-
-    def insert_autocare_raw_marketing_page(self, page_data: List[Dict]) -> None:
-        """
-        Append one page of raw AutoCare marketing records to
-        autocare_raw.marketing_data_raw (append-only audit log).
-        Every run appends all fetched records with their ingested_at timestamp
-        so the raw table is a full daily snapshot partitioned by date.
-        """
-        if not page_data:
-            return
-        table_id = f"{self.project_id}.{self.autocare_raw_dataset}.marketing_data_raw"
-        now = datetime.utcnow().isoformat()
-        rows = []
-        for i, item in enumerate(page_data):
-            rid = item.get("clientId") or item.get("sessionId") or f"row_{i}"
-            record_type = "session" if item.get("sessionId") else "customer"
-            rows.append({
-                "id": rid,
-                "record_type": record_type,
-                "json_data": json.dumps(item),
-                "ingested_at": now,
-            })
-        for i in range(0, len(rows), 500):
-            errors = self.client.insert_rows_json(table_id, rows[i : i + 500])
-            if errors:
-                raise Exception(f"Failed to insert raw marketing page: {errors}")
-
-    def insert_autocare_staging_batch(
-        self,
-        customers: List[Dict],
-        subscriptions: List[Dict],
-        sessions: List[Dict],
-        cars: List[Dict],
-    ) -> None:
-        """
-        Insert one page of parsed entity records into the 4 staging tables.
-        Staging tables accumulate all pages during the run; a single MERGE
-        at the end converts them into the final processed state.
-        """
-        p  = self.project_id
-        ds = self.autocare_processed_dataset
-        for table_name, rows in [
-            ("staging_customers",     customers),
-            ("staging_subscriptions", subscriptions),
-            ("staging_sessions",      sessions),
-            ("staging_cars",          cars),
-        ]:
-            if not rows:
-                continue
-            table_id = f"{p}.{ds}.{table_name}"
-            for i in range(0, len(rows), 500):
-                errors = self.client.insert_rows_json(table_id, rows[i : i + 500])
-                if errors:
-                    raise Exception(f"Failed to insert to {table_name}: {errors}")
-
-    def merge_autocare_staging_to_processed(self) -> None:
-        """
-        Run one MERGE per entity from staging → processed tables.
-        Each MERGE deduplicates the staging data first (ROW_NUMBER per primary
-        key) so cross-page duplicates do not cause ambiguous-match errors.
-
-        Semantics:
-          MATCHED     → UPDATE all mutable fields, keep original ingested_at
-          NOT MATCHED → INSERT as new record
-        """
-        p  = self.project_id
-        ds = self.autocare_processed_dataset
-
-        merges = {
-            "marketing_customers": f"""
-                MERGE `{p}.{ds}.marketing_customers` AS T
-                USING (
-                  SELECT * EXCEPT (rn) FROM (
-                    SELECT *,
-                      ROW_NUMBER() OVER (PARTITION BY client_id ORDER BY ingested_at DESC) AS rn
-                    FROM `{p}.{ds}.staging_customers`
-                  ) WHERE rn = 1
-                ) AS S
-                ON T.client_id = S.client_id
-                WHEN MATCHED THEN UPDATE SET
-                  T.billing_id            = S.billing_id,
-                  T.email                 = S.email,
-                  T.first_name            = S.first_name,
-                  T.last_name             = S.last_name,
-                  T.phone_number          = S.phone_number,
-                  T.customer_created_date = S.customer_created_date,
-                  T.updated_at            = CURRENT_TIMESTAMP()
-                WHEN NOT MATCHED THEN INSERT (
-                  client_id, billing_id, email, first_name, last_name,
-                  phone_number, customer_created_date, updated_at, ingested_at
-                ) VALUES (
-                  S.client_id, S.billing_id, S.email, S.first_name, S.last_name,
-                  S.phone_number, S.customer_created_date,
-                  CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-                )
-            """,
-
-            "marketing_subscriptions": f"""
-                MERGE `{p}.{ds}.marketing_subscriptions` AS T
-                USING (
-                  SELECT * EXCEPT (rn) FROM (
-                    SELECT *,
-                      ROW_NUMBER() OVER (PARTITION BY subscription_id ORDER BY ingested_at DESC) AS rn
-                    FROM `{p}.{ds}.staging_subscriptions`
-                  ) WHERE rn = 1
-                ) AS S
-                ON T.subscription_id = S.subscription_id
-                WHEN MATCHED THEN UPDATE SET
-                  T.client_id  = S.client_id,
-                  T.billing_id = S.billing_id,
-                  T.status     = S.status,
-                  T.product_id = S.product_id,
-                  T.car_ids    = S.car_ids,
-                  T.updated_at = CURRENT_TIMESTAMP()
-                WHEN NOT MATCHED THEN INSERT (
-                  subscription_id, client_id, billing_id, status,
-                  product_id, car_ids, updated_at, ingested_at
-                ) VALUES (
-                  S.subscription_id, S.client_id, S.billing_id, S.status,
-                  S.product_id, S.car_ids, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-                )
-            """,
-
-            "marketing_sessions": f"""
-                MERGE `{p}.{ds}.marketing_sessions` AS T
-                USING (
-                  SELECT * EXCEPT (rn) FROM (
-                    SELECT *,
-                      ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ingested_at DESC) AS rn
-                    FROM `{p}.{ds}.staging_sessions`
-                  ) WHERE rn = 1
-                ) AS S
-                ON T.session_id = S.session_id
-                WHEN MATCHED THEN UPDATE SET
-                  T.client_id           = S.client_id,
-                  T.session_date        = S.session_date,
-                  T.session_type        = S.session_type,
-                  T.session_description = S.session_description,
-                  T.location_id         = S.location_id,
-                  T.location_name       = S.location_name,
-                  T.location_is_active  = S.location_is_active,
-                  T.updated_at          = CURRENT_TIMESTAMP()
-                WHEN NOT MATCHED THEN INSERT (
-                  session_id, client_id, session_date, session_type,
-                  session_description, location_id, location_name,
-                  location_is_active, updated_at, ingested_at
-                ) VALUES (
-                  S.session_id, S.client_id, S.session_date, S.session_type,
-                  S.session_description, S.location_id, S.location_name,
-                  S.location_is_active, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-                )
-            """,
-
-            "marketing_cars": f"""
-                MERGE `{p}.{ds}.marketing_cars` AS T
-                USING (
-                  SELECT * EXCEPT (rn) FROM (
-                    SELECT *,
-                      ROW_NUMBER() OVER (PARTITION BY car_id ORDER BY ingested_at DESC) AS rn
-                    FROM `{p}.{ds}.staging_cars`
-                  ) WHERE rn = 1
-                ) AS S
-                ON T.car_id = S.car_id
-                WHEN MATCHED THEN UPDATE SET
-                  T.client_id     = S.client_id,
-                  T.billing_id    = S.billing_id,
-                  T.json_data     = S.json_data,
-                  T.make          = S.make,
-                  T.model         = S.model,
-                  T.year          = S.year,
-                  T.license_plate = S.license_plate,
-                  T.color         = S.color,
-                  T.vin           = S.vin,
-                  T.updated_at    = CURRENT_TIMESTAMP()
-                WHEN NOT MATCHED THEN INSERT (
-                  car_id, client_id, billing_id, json_data,
-                  make, model, year, license_plate, color, vin,
-                  updated_at, ingested_at
-                ) VALUES (
-                  S.car_id, S.client_id, S.billing_id, S.json_data,
-                  S.make, S.model, S.year, S.license_plate, S.color, S.vin,
-                  CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-                )
-            """,
-        }
-
-        for entity_name, sql in merges.items():
-            logger.info("MERGE staging → %s ...", entity_name)
-            self.client.query(sql.strip()).result()
-            logger.info("MERGE %s complete", entity_name)
 
     # ---------- Unified and BI tables (run after all Stripe + AutoCare syncs) ----------
 

@@ -16,9 +16,11 @@ BASE_URL  = "https://memberships.autocarepr.com/api"
 LOGIN_URL = f"{BASE_URL}/login"
 TIERS_URL = f"{BASE_URL}/v1/marketing/tiers"
 DATA_URL  = f"{BASE_URL}/v1/marketing/data"
+STRIPE_CUSTOMERS_URL = f"{BASE_URL}/v1/marketing/stripe-customers"
 
 # Pagination / retry / pressure-relief settings
 _PAGE_SIZE   = 1000
+_STRIPE_LIMIT = 1000  # max per request for stripe-customers (API doc: limit default 100, max 1000)
 _MAX_RETRIES = 3
 _RETRY_SLEEP = 3    # seconds between retry attempts on transient errors
 _PAGE_SLEEP  = 0.3  # seconds between consecutive page fetches to reduce server pressure
@@ -241,3 +243,42 @@ class AutoCareClient:
 
             page += 1
             time.sleep(_PAGE_SLEEP)
+
+    def get_stripe_customers(self) -> List[Dict[str, Any]]:
+        """
+        Fetch all Stripe-linked customers from v1/marketing/stripe-customers.
+        Uses cursor-based pagination (limit + nextCursor). Returns full list in memory.
+        Requires API_ADMIN role. ~11k records typically; runs in seconds.
+        """
+        all_records: List[Dict] = []
+        cursor: Optional[str] = None
+        page_num = 0
+
+        while True:
+            params: Dict[str, Any] = {"limit": _STRIPE_LIMIT}
+            if cursor:
+                params["cursor"] = cursor
+
+            logger.info("AutoCare stripe-customers: fetching page %s ...", page_num + 1)
+            body = self._get_with_retry(STRIPE_CUSTOMERS_URL, params)
+            batch = self._extract_list(body, "get_stripe_customers")
+            next_cursor = body.get("nextCursor") if isinstance(body, dict) else None
+
+            if not batch:
+                logger.info("AutoCare stripe-customers: page empty — done.")
+                break
+
+            all_records.extend(batch)
+            page_num += 1
+            logger.info(
+                "AutoCare stripe-customers: page %d → %d records (total %d)",
+                page_num, len(batch), len(all_records),
+            )
+
+            if not next_cursor:
+                break
+            cursor = next_cursor
+            time.sleep(_PAGE_SLEEP)
+
+        logger.info("AutoCare stripe-customers: fetched %d total", len(all_records))
+        return all_records

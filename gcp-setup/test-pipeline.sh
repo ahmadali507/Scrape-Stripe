@@ -1,16 +1,6 @@
 #!/bin/bash
-# Test script for the two-component pipeline:
-#
-#   Component 1 — AutoCare Cloud Run Job  (autocare-sync-job)
-#     Streams 700k+ records, ~1.5h, triggers Component 2 on completion
-#
-#   Component 2 — Stripe Cloud Function   (stripe-bigquery-sync)
-#     Incremental Stripe sync + unified/BI refresh, ~2-5 min
-#     Scheduled independently; also called by the Cloud Run Job
-#
-# Test 4 triggers ONLY the Stripe function (skip_autocare=true) for a
-# fast smoke-test. The full AutoCare job takes ~1.5h and must be triggered
-# manually via:  gcloud run jobs execute autocare-sync-job --region=us-central1
+# Test script for the pipeline: one Cloud Function runs AutoCare (stripe-customers)
+# + Stripe incremental + unified/BI. One scheduler (stripe-bigquery-daily-sync) triggers it daily.
 
 set -e
 
@@ -34,10 +24,8 @@ echo -e "${YELLOW}Project: $PROJECT_ID${NC}"
 echo ""
 
 FUNCTION_NAME="stripe-bigquery-sync"
-CLOUD_RUN_JOB="autocare-sync-job"
 REGION="us-central1"
-AC_SCHEDULER="autocare-sync-daily"
-STRIPE_SCHEDULER="stripe-bigquery-daily-sync"
+SCHEDULER_JOB="stripe-bigquery-daily-sync"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 _mask() {
@@ -108,29 +96,7 @@ echo ""
 CF_ENV=$(gcloud functions describe "$FUNCTION_NAME" \
     --region="$REGION" --gen2 \
     --format='value(serviceConfig.environmentVariables)' 2>/dev/null || echo "")
-_show_resource_env "Stripe Cloud Function" "$CF_ENV"
-
-echo ""
-
-# Cloud Run Job env vars
-JOB_ENV=$(gcloud run jobs describe "$CLOUD_RUN_JOB" \
-    --region="$REGION" \
-    --format='value(spec.template.spec.template.spec.containers[0].env)' \
-    2>/dev/null || echo "")
-# Alternative format if above fails
-if [ -z "$JOB_ENV" ]; then
-    JOB_ENV=$(gcloud run jobs describe "$CLOUD_RUN_JOB" \
-        --region="$REGION" \
-        --format='json' 2>/dev/null \
-        | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    envs = d['spec']['template']['spec']['template']['spec']['containers'][0].get('env', [])
-    print(','.join(f\"{e['name']}={e.get('value','')}\" for e in envs))
-except: pass" 2>/dev/null || echo "")
-fi
-_show_resource_env "AutoCare Cloud Run Job" "$JOB_ENV"
+_show_resource_env "Cloud Function" "$CF_ENV"
 
 echo ""
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -173,17 +139,10 @@ for TBL in tiers marketing_customers marketing_subscriptions \
 done
 
 echo ""
-echo "  Checking AutoCare staging tables (required by Cloud Run Job)..."
-STAGING_OK=1
-for TBL in staging_customers staging_subscriptions staging_sessions staging_cars; do
-    if bq show --project_id="$PROJECT_ID" "autocare_processed.${TBL}" &>/dev/null; then
-        echo -e "    ${GREEN}✓${NC} autocare_processed.$TBL"
-    else
-        echo -e "    ${RED}✗${NC} autocare_processed.$TBL — missing (run ./create-tables.sh)"
-        STAGING_OK=0
-    fi
-done
-[ "$STAGING_OK" -eq 0 ] && echo -e "  ${RED}✗ Staging tables missing — Cloud Run Job will fail${NC}"
+echo "  Checking AutoCare raw (stripe_customers_raw)..."
+bq show --project_id="$PROJECT_ID" "autocare_raw.stripe_customers_raw" &>/dev/null \
+    && echo -e "    ${GREEN}✓${NC} autocare_raw.stripe_customers_raw" \
+    || echo -e "    ${YELLOW}⚠${NC} autocare_raw.stripe_customers_raw — run ./create-tables.sh"
 echo ""
 
 echo "  Checking unified / BI tables..."
@@ -210,55 +169,32 @@ done
 [ "$SM_OK" -eq 0 ] && exit 1
 echo ""
 
-# ── Test 3: Verify both compute resources ─────────────────────────────────────
-echo -e "${BLUE}Test 3: Verifying compute resources...${NC}"
+# ── Test 3: Cloud Function ───────────────────────────────────────────────────
+echo -e "${BLUE}Test 3: Verifying Cloud Function...${NC}"
 
-# 3a — Stripe Cloud Function
 if gcloud functions describe "$FUNCTION_NAME" --region="$REGION" --gen2 \
        --project="$PROJECT_ID" &>/dev/null; then
     FUNCTION_URL=$(gcloud functions describe "$FUNCTION_NAME" \
         --region="$REGION" --gen2 \
         --format='value(serviceConfig.uri)')
-    echo -e "  ${GREEN}✓${NC} Stripe Cloud Function deployed"
+    echo -e "  ${GREEN}✓${NC} Cloud Function deployed"
     echo "    URL: $FUNCTION_URL"
 else
-    echo -e "  ${RED}✗${NC} Stripe Cloud Function NOT deployed — run: ./deploy-function.sh"
+    echo -e "  ${RED}✗${NC} Cloud Function NOT deployed — run: ./deploy-function.sh"
     FUNCTION_URL=""
 fi
-
 echo ""
 
-# 3b — AutoCare Cloud Run Job
-if gcloud run jobs describe "$CLOUD_RUN_JOB" --region="$REGION" \
-       --project="$PROJECT_ID" &>/dev/null; then
-    JOB_CREATED=$(gcloud run jobs describe "$CLOUD_RUN_JOB" \
-        --region="$REGION" --format='value(metadata.creationTimestamp)' 2>/dev/null || echo "unknown")
-    JOB_IMAGE=$(gcloud run jobs describe "$CLOUD_RUN_JOB" \
-        --region="$REGION" \
-        --format='value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null || echo "unknown")
-    echo -e "  ${GREEN}✓${NC} AutoCare Cloud Run Job deployed"
-    echo "    Image  : $JOB_IMAGE"
-    echo "    Created: $JOB_CREATED"
-else
-    echo -e "  ${YELLOW}⚠${NC} AutoCare Cloud Run Job NOT deployed — run: ./deploy-job.sh"
-fi
-echo ""
-
-# ── Test 4: Stripe smoke-test (skip_autocare=true, fast ~2-5 min) ─────────────
-echo -e "${BLUE}Test 4: Stripe smoke-test (skip_autocare=true, ~2-5 min)...${NC}"
-echo ""
-echo -e "  ${YELLOW}Note: This tests ONLY the Stripe sync + unified/BI refresh.${NC}"
-echo -e "  ${YELLOW}To test the full AutoCare job (~1.5h) run manually:${NC}"
-echo -e "  ${YELLOW}  gcloud run jobs execute $CLOUD_RUN_JOB --region=$REGION${NC}"
+# ── Test 4: Full sync smoke-test (AutoCare + Stripe + unified/BI, ~1-3 min) ───
+echo -e "${BLUE}Test 4: Full sync (AutoCare stripe-customers + Stripe + unified/BI)...${NC}"
 echo ""
 
 if [ -z "$FUNCTION_URL" ]; then
-    echo -e "  ${RED}✗ Skipping — Stripe Cloud Function not deployed${NC}"
+    echo -e "  ${RED}✗ Skipping — Cloud Function not deployed${NC}"
 else
-    echo "  Invoking Stripe Cloud Function with skip_autocare=true ..."
+    echo "  Invoking Cloud Function (no body = full sync)..."
     RESPONSE=$(curl -s -X POST "$FUNCTION_URL" \
         -H "Content-Type: application/json" \
-        -d '{"skip_autocare": true}' \
         -w "\n%{http_code}" \
         --max-time 600)
 
@@ -286,7 +222,7 @@ echo "  stripe_processed.subscriptions      : $(bq_count "stripe_processed.subsc
 echo ""
 echo "  --- AutoCare raw ---"
 echo "  autocare_raw.tiers_raw              : $(bq_count "autocare_raw.tiers_raw") rows"
-echo "  autocare_raw.marketing_data_raw     : $(bq_count "autocare_raw.marketing_data_raw") rows"
+echo "  autocare_raw.stripe_customers_raw   : $(bq_count "autocare_raw.stripe_customers_raw") rows"
 
 echo ""
 echo "  --- AutoCare processed ---"
@@ -296,13 +232,6 @@ echo "  autocare_processed.marketing_customers     : $AC_CUST rows"
 echo "  autocare_processed.marketing_subscriptions : $(bq_count "autocare_processed.marketing_subscriptions") rows"
 echo "  autocare_processed.marketing_sessions      : $(bq_count "autocare_processed.marketing_sessions") rows"
 echo "  autocare_processed.marketing_cars          : $(bq_count "autocare_processed.marketing_cars") rows"
-
-echo ""
-echo "  --- AutoCare staging (should be 0 when no job is running) ---"
-echo "  autocare_processed.staging_customers       : $(bq_count "autocare_processed.staging_customers") rows"
-echo "  autocare_processed.staging_subscriptions   : $(bq_count "autocare_processed.staging_subscriptions") rows"
-echo "  autocare_processed.staging_sessions        : $(bq_count "autocare_processed.staging_sessions") rows"
-echo "  autocare_processed.staging_cars            : $(bq_count "autocare_processed.staging_cars") rows"
 
 echo ""
 echo "  --- Unified / BI ---"
@@ -320,59 +249,19 @@ echo ""
     || echo -e "  ${YELLOW}⚠ bi.unified_customer_360_snapshot empty${NC}"
 echo ""
 
-# ── Test 6: Cloud Scheduler jobs ─────────────────────────────────────────────
-echo -e "${BLUE}Test 6: Verifying Cloud Scheduler jobs...${NC}"
-echo ""
-
-# 6a — AutoCare Cloud Run Job scheduler (primary)
-echo -e "  ${BLUE}--- AutoCare job scheduler (primary) ---${NC}"
-if gcloud scheduler jobs describe "$AC_SCHEDULER" \
+# ── Test 6: Cloud Scheduler ───────────────────────────────────────────────────
+echo -e "${BLUE}Test 6: Verifying Cloud Scheduler...${NC}"
+if gcloud scheduler jobs describe "$SCHEDULER_JOB" \
        --location="$REGION" --project="$PROJECT_ID" &>/dev/null; then
-    AC_STATUS=$(gcloud scheduler jobs describe "$AC_SCHEDULER" \
+    S_STATUS=$(gcloud scheduler jobs describe "$SCHEDULER_JOB" \
         --location="$REGION" --format='value(state)' 2>/dev/null)
-    AC_SCHEDULE=$(gcloud scheduler jobs describe "$AC_SCHEDULER" \
+    S_SCHEDULE=$(gcloud scheduler jobs describe "$SCHEDULER_JOB" \
         --location="$REGION" --format='value(schedule)' 2>/dev/null)
-    AC_LAST=$(gcloud scheduler jobs describe "$AC_SCHEDULER" \
-        --location="$REGION" --format='value(lastAttemptTime)' 2>/dev/null || echo "never")
-    echo -e "  ${GREEN}✓${NC} $AC_SCHEDULER"
-    echo "    Schedule    : $AC_SCHEDULE UTC"
-    echo "    State       : $AC_STATUS"
-    echo "    Last attempt: $AC_LAST"
-else
-    echo -e "  ${YELLOW}⚠${NC} $AC_SCHEDULER not found — run: ./deploy-job.sh"
-fi
-echo ""
-
-# 6b — Direct Stripe-only scheduler (optional fallback)
-echo -e "  ${BLUE}--- Stripe-only scheduler (optional fallback) ---${NC}"
-if gcloud scheduler jobs describe "$STRIPE_SCHEDULER" \
-       --location="$REGION" --project="$PROJECT_ID" &>/dev/null; then
-    S_STATUS=$(gcloud scheduler jobs describe "$STRIPE_SCHEDULER" \
-        --location="$REGION" --format='value(state)' 2>/dev/null)
-    S_SCHEDULE=$(gcloud scheduler jobs describe "$STRIPE_SCHEDULER" \
-        --location="$REGION" --format='value(schedule)' 2>/dev/null)
-    echo -e "  ${GREEN}✓${NC} $STRIPE_SCHEDULER"
+    echo -e "  ${GREEN}✓${NC} $SCHEDULER_JOB"
     echo "    Schedule : $S_SCHEDULE UTC"
     echo "    State    : $S_STATUS"
-    echo -e "    ${YELLOW}Note: Only use this for Stripe-only re-syncs; AutoCare job triggers Stripe automatically${NC}"
 else
-    echo -e "  ${YELLOW}ℹ${NC} $STRIPE_SCHEDULER not configured (optional — run ./setup-scheduler.sh to add)"
-fi
-echo ""
-
-# ── Test 7: Recent Cloud Run Job executions ───────────────────────────────────
-echo -e "${BLUE}Test 7: Recent AutoCare job executions...${NC}"
-if gcloud run jobs describe "$CLOUD_RUN_JOB" --region="$REGION" \
-       --project="$PROJECT_ID" &>/dev/null; then
-    EXECS=$(gcloud run jobs executions list \
-        --job="$CLOUD_RUN_JOB" \
-        --region="$REGION" \
-        --limit=5 \
-        --format='table(name.basename(),completionTime,status.conditions[0].type)' \
-        2>/dev/null || echo "  (no executions yet)")
-    echo "$EXECS"
-else
-    echo -e "  ${YELLOW}⚠${NC} Cloud Run Job not deployed — no executions to show"
+    echo -e "  ${YELLOW}⚠${NC} $SCHEDULER_JOB not found — run: ./setup-scheduler.sh"
 fi
 echo ""
 
@@ -382,24 +271,14 @@ echo "Pipeline Test Complete!"
 echo "==========================================${NC}"
 echo ""
 echo "Architecture:"
-echo "  Cloud Scheduler ($AC_SCHEDULER at 4 AM UTC)"
-echo "    └─▶ AutoCare Cloud Run Job ($CLOUD_RUN_JOB, ~1.5h)"
-echo "          └─▶ Stripe Cloud Function ($FUNCTION_NAME, ~2-5 min)"
-echo "                └─▶ unified.customers + bi.unified_customer_360_snapshot"
+echo "  Cloud Scheduler ($SCHEDULER_JOB at 4 AM UTC)"
+echo "    └─▶ Cloud Function ($FUNCTION_NAME): AutoCare (stripe-customers) + Stripe + unified/BI"
 echo ""
 echo "Manual commands:"
+echo "  Trigger full sync:  gcloud scheduler jobs run $SCHEDULER_JOB --location=$REGION"
+echo "  Or:  curl -X POST \$FUNCTION_URL -H 'Content-Type: application/json'"
 echo ""
-echo "  Run AutoCare job (full ~1.5h sync + triggers Stripe):"
-echo "    gcloud run jobs execute $CLOUD_RUN_JOB --region=$REGION --wait"
-echo ""
-echo "  Run Stripe-only (fast, incremental):"
-echo "    curl -X POST \$FUNCTION_URL -H 'Content-Type: application/json' -d '{\"skip_autocare\": true}'"
-echo ""
-echo "  View AutoCare job logs:"
-echo "    gcloud run jobs executions list --job=$CLOUD_RUN_JOB --region=$REGION"
-echo "    gcloud logging read 'resource.type=cloud_run_job' --limit=100 --project=$PROJECT_ID"
-echo ""
-echo "  View Stripe function logs:"
+echo "  View function logs:"
 echo "    gcloud functions logs read $FUNCTION_NAME --region=$REGION --gen2 --limit=50"
 echo ""
 echo "  Check AutoCare sync metadata:"

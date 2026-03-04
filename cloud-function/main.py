@@ -186,109 +186,95 @@ def _get_autocare_credentials() -> tuple:
         return email or None, password or None
 
 
-def parse_marketing_page(
+def parse_stripe_customers_batch(
     data: List[Dict],
 ) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
     """
-    Parse one page of AutoCare marketing API records into four entity lists:
-    (customers, subscriptions, sessions, cars).
-
-    Deduplicates customers within the page by (client_id, billing_id).
-    Cross-page duplicates are handled by the BigQuery MERGE at job end.
+    Parse stripe-customers API records into four entity lists.
+    Each record has: clientId, billingID, subscriptions[], cars[] (brand, plate),
+    latestSession, latestSessionLocation. Sessions: latest only. Cars: brand→make, plate→license_plate.
     """
-    customers:     List[Dict] = []
-    subscriptions: List[Dict] = []
-    sessions:      List[Dict] = []
-    cars:          List[Dict] = []
-    seen_customers: set = set()
+    customers = []
+    subscriptions = []
+    sessions = []
+    cars = []
     now = datetime.utcnow().isoformat()
 
     for item in data:
-        # Sessions
-        if item.get("sessionId"):
-            loc = item.get("location") or {}
-            sessions.append({
-                "session_id":          item.get("sessionId"),
-                "client_id":           item.get("clientId") or "",
-                "session_date":        item.get("sessionDate"),
-                "session_type":        item.get("sessionType"),
-                "session_description": item.get("sessionDescription"),
-                "location_id":         loc.get("id"),
-                "location_name":       loc.get("name"),
-                "location_is_active":  loc.get("isActive"),
-                "updated_at":          now,
-                "ingested_at":         now,
+        cid = item.get("clientId") or ""
+        bid = item.get("billingID")
+        if not cid and not bid and not item.get("email"):
+            continue
+
+        customers.append({
+            "client_id": cid,
+            "billing_id": bid,
+            "email": item.get("email"),
+            "first_name": item.get("firstName"),
+            "last_name": item.get("lastName"),
+            "phone_number": item.get("phoneNumber"),
+            "customer_created_date": item.get("customerCreatedDate"),
+            "updated_at": now,
+            "ingested_at": now,
+        })
+
+        for sub in item.get("subscriptions") or []:
+            subscriptions.append({
+                "subscription_id": sub.get("id"),
+                "client_id": cid,
+                "billing_id": bid,
+                "status": sub.get("status"),
+                "product_id": sub.get("productId"),
+                "car_ids": json.dumps(sub.get("carIds") or []),
+                "updated_at": now,
+                "ingested_at": now,
             })
 
-        # Customers + subscriptions + cars
-        if item.get("clientId") or item.get("billingID") or item.get("email"):
-            key = (item.get("clientId") or "", item.get("billingID") or "")
-            if key not in seen_customers:
-                seen_customers.add(key)
-                customers.append({
-                    "client_id":             item.get("clientId") or "",
-                    "billing_id":            item.get("billingID"),
-                    "email":                 item.get("email"),
-                    "first_name":            item.get("firstName"),
-                    "last_name":             item.get("lastName"),
-                    "phone_number":          item.get("phoneNumber"),
-                    "customer_created_date": item.get("customerCreatedDate"),
-                    "updated_at":            now,
-                    "ingested_at":           now,
-                })
+        ls = item.get("latestSession") or {}
+        loc = item.get("latestSessionLocation") or {}
+        if ls.get("sessionId"):
+            sessions.append({
+                "session_id": ls.get("sessionId"),
+                "client_id": cid,
+                "session_date": ls.get("sessionDate"),
+                "session_type": ls.get("sessionType"),
+                "session_description": ls.get("sessionDescription"),
+                "location_id": loc.get("id"),
+                "location_name": loc.get("name"),
+                "location_is_active": loc.get("isActive"),
+                "updated_at": now,
+                "ingested_at": now,
+            })
 
-            for sub in item.get("subscriptions") or []:
-                subscriptions.append({
-                    "subscription_id": sub.get("id"),
-                    "client_id":       item.get("clientId") or "",
-                    "billing_id":      item.get("billingID"),
-                    "status":          sub.get("status"),
-                    "product_id":      sub.get("productId"),
-                    "car_ids":         json.dumps(sub.get("carIds") or []),
-                    "updated_at":      now,
-                    "ingested_at":     now,
-                })
-
-            for car in item.get("cars") or []:
-                if not isinstance(car, dict):
-                    continue
-                car_id = car.get("id") or car.get("_id") or ""
-                if not car_id:
-                    continue
-                cars.append({
-                    "car_id":        car_id,
-                    "client_id":     item.get("clientId") or "",
-                    "billing_id":    item.get("billingID"),
-                    "json_data":     json.dumps(car),
-                    "make":          car.get("make"),
-                    "model":         car.get("model"),
-                    "year":          car.get("year"),
-                    "license_plate": car.get("licensePlate") or car.get("license_plate"),
-                    "color":         car.get("color"),
-                    "vin":           car.get("vin"),
-                    "updated_at":    now,
-                    "ingested_at":   now,
-                })
+        for car in item.get("cars") or []:
+            if not isinstance(car, dict):
+                continue
+            car_id = car.get("id") or car.get("_id") or ""
+            if not car_id:
+                continue
+            cars.append({
+                "car_id": car_id,
+                "client_id": cid,
+                "billing_id": bid,
+                "json_data": json.dumps(car),
+                "make": car.get("brand") or car.get("make"),
+                "model": car.get("model"),
+                "year": car.get("year") or 0,
+                "license_plate": car.get("plate") or car.get("licensePlate") or car.get("license_plate"),
+                "color": car.get("color"),
+                "vin": car.get("vin"),
+                "updated_at": now,
+                "ingested_at": now,
+            })
 
     return customers, subscriptions, sessions, cars
 
 
 def sync_autocare_to_bigquery(bq_client: BigQueryClient) -> Dict[str, Any]:
     """
-    Stream AutoCare tiers + marketing data page-by-page into BigQuery.
-
-    Architecture:
-      1. Tiers   → TRUNCATE + full reload (small reference table, fast)
-      2. Marketing data (700k+ records):
-         a. prepare_autocare_staging() — TRUNCATE staging tables once
-         b. For each page (~1 000 records):
-              - Append raw records to autocare_raw.marketing_data_raw
-              - Parse into 4 entity types
-              - INSERT parsed rows into staging tables
-         c. merge_autocare_staging_to_processed() — one MERGE per entity
-            at the end (dedup + upsert into processed tables)
-
-    Memory: bounded to O(1 page) ≈ 2–3 MB regardless of dataset size.
+    Sync AutoCare from stripe-customers endpoint (Stripe-linked only, ~11k records).
+    Flow: tiers (TRUNCATE+reload) → stripe-customers (cursor, all pages) → raw append
+    → parse → TRUNCATE+INSERT into four processed tables. No staging; runs in Cloud Function.
     """
     if AutoCareClient is None:
         return {"status": "failed", "error": "autocare_client not available", "records_synced": 0}
@@ -317,67 +303,46 @@ def sync_autocare_to_bigquery(bq_client: BigQueryClient) -> Dict[str, Any]:
         bq_client.update_autocare_sync_metadata(
             "autocare_tiers", len(tiers), sync_started_at, datetime.utcnow(), "success"
         )
-        logger.info(f"Tiers synced: {len(tiers)} records")
+        logger.info("Tiers synced: %d records", len(tiers))
 
-        # ── 2. Marketing data (streaming) ────────────────────────────
-        bq_client.prepare_autocare_staging()
+        # ── 2. Stripe-linked customers (cursor, full fetch) ────────────
+        all_stripe_customers = ac.get_stripe_customers()
+        if not all_stripe_customers:
+            logger.info("No stripe-customers records")
+            bq_client.update_autocare_sync_metadata(
+                "autocare_stripe_customers", 0, sync_started_at, datetime.utcnow(), "success"
+            )
+            return {"status": "success", "records_synced": 0, "tiers": len(tiers), "pages": 0}
 
-        total_records = 0
-        total_pages   = 0
-        failed_pages:  List[int] = []
-
-        for page_num, page_data in enumerate(ac.stream_marketing_data_pages(), start=1):
-            try:
-                # Raw audit log — append all records from this page
-                bq_client.insert_autocare_raw_marketing_page(page_data)
-
-                # Parse page into entity types and write to staging
-                customers, subscriptions, sessions, cars = parse_marketing_page(page_data)
-                bq_client.insert_autocare_staging_batch(customers, subscriptions, sessions, cars)
-
-                total_records += len(page_data)
-                total_pages    = page_num
-
-                if page_num % 50 == 0:
-                    logger.info(
-                        "Progress: page %d — %d records so far", page_num, total_records
-                    )
-
-            except Exception as page_err:
-                logger.error("Page %d failed (skipping): %s", page_num, page_err, exc_info=True)
-                failed_pages.append(page_num)
-                continue
-
-        logger.info(
-            "Streaming complete: %d pages, %d records, %d failed pages",
-            total_pages, total_records, len(failed_pages),
+        bq_client.insert_autocare_raw_stripe_customers(all_stripe_customers)
+        customers, subscriptions, sessions, cars = parse_stripe_customers_batch(all_stripe_customers)
+        bq_client.replace_autocare_processed_from_stripe_customers(
+            customers, subscriptions, sessions, cars
         )
 
-        # ── 3. MERGE staging → processed (one pass per entity) ───────
-        bq_client.merge_autocare_staging_to_processed()
-
-        status = "success" if not failed_pages else "partial"
+        total_records = len(all_stripe_customers)
         bq_client.update_autocare_sync_metadata(
-            "autocare_marketing_data",
+            "autocare_stripe_customers",
             total_records,
             sync_started_at,
             datetime.utcnow(),
-            status,
-            error_message=f"Failed pages: {failed_pages}" if failed_pages else None,
+            "success",
         )
 
         return {
-            "status":        status,
+            "status": "success",
             "records_synced": total_records,
-            "tiers":          len(tiers),
-            "pages":          total_pages,
-            "failed_pages":   failed_pages,
+            "tiers": len(tiers),
+            "customers": len(customers),
+            "subscriptions": len(subscriptions),
+            "sessions": len(sessions),
+            "cars": len(cars),
         }
 
     except Exception as e:
         logger.exception("AutoCare sync failed")
         bq_client.update_autocare_sync_metadata(
-            "autocare_marketing_data", 0, sync_started_at, datetime.utcnow(), "failed",
+            "autocare_stripe_customers", 0, sync_started_at, datetime.utcnow(), "failed",
             error_message=str(e),
         )
         return {"status": "failed", "error": str(e), "records_synced": 0}
